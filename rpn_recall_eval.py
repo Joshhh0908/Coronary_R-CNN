@@ -121,7 +121,7 @@ def main():
     ap.add_argument("--use_train_sampling", action="store_true")
 
     # proposal params
-    ap.add_argument("--score_thresh", type=float, default=0.3)
+    ap.add_argument("--score_thresh", type=float, default=0.4)
     ap.add_argument("--pre_nms_topk", type=int, default=600)
     ap.add_argument("--post_nms_topk", type=int, default=100)
     ap.add_argument("--nms_iou", type=float, default=0.5)

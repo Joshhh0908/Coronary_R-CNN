@@ -408,3 +408,75 @@ def rpn_loss_1d(
         "sampled_anchors": int(total_samp),
     }
     return loss, stats
+
+####################### ROI POOLING ############################
+
+def roi_pool_1d(
+    feat: torch.Tensor,          # [B, C, Lf]
+    proposals: list,             # list length B, each: [Pi,2] in FEATURE coords (float)
+    roi_len: int = 16,
+    pool: str = "max",           # "max" or "avg"
+):
+    """
+    Returns:
+      roi_feat:  [R, C, roi_len]  (R = total proposals across batch)
+      roi_batch: [R]             (which batch item each RoI came from)
+      roi_boxes: [R, 2]          (proposal boxes in FEATURE coords, clipped)
+    """
+    assert feat.dim() == 3, "feat must be [B,C,Lf]"
+    B, C, Lf = feat.shape
+    device = feat.device
+
+    roi_feats = []
+    roi_batch = []
+    roi_boxes = []
+
+    for b in range(B):
+        props = proposals[b]
+        if props is None or props.numel() == 0:
+            continue
+
+        # Ensure shape [Pi,2]
+        if props.dim() == 1:
+            props = props.view(1, 2)
+
+        for i in range(props.shape[0]):
+            s = float(props[i, 0].item())
+            e = float(props[i, 1].item())
+
+            # clip to [0, Lf]
+            s = max(0.0, min(s, float(Lf)))
+            e = max(0.0, min(e, float(Lf)))
+            if e <= s:
+                continue
+
+            # convert to integer slicing range (inclusive-ish)
+            s_idx = int(torch.floor(torch.tensor(s)).item())
+            e_idx = int(torch.ceil(torch.tensor(e)).item())
+            s_idx = max(0, min(s_idx, Lf - 1))
+            e_idx = max(s_idx + 1, min(e_idx, Lf))  # ensure at least 1
+
+            region = feat[b:b+1, :, s_idx:e_idx]  # [1,C,Lr]
+
+            if pool == "max":
+                pooled = F.adaptive_max_pool1d(region, roi_len)  # [1,C,roi_len]
+            elif pool == "avg":
+                pooled = F.adaptive_avg_pool1d(region, roi_len)
+            else:
+                raise ValueError("pool must be 'max' or 'avg'")
+
+            roi_feats.append(pooled.squeeze(0))  # [C,roi_len]
+            roi_batch.append(b)
+            roi_boxes.append([s, e])
+
+    if len(roi_feats) == 0:
+        roi_feat = torch.zeros((0, C, roi_len), device=device, dtype=feat.dtype)
+        roi_batch = torch.zeros((0,), device=device, dtype=torch.long)
+        roi_boxes = torch.zeros((0, 2), device=device, dtype=torch.float32)
+        return roi_feat, roi_batch, roi_boxes
+
+    roi_feat = torch.stack(roi_feats, dim=0)  # [R,C,roi_len]
+    roi_batch = torch.tensor(roi_batch, device=device, dtype=torch.long)  # [R]
+    roi_boxes = torch.tensor(roi_boxes, device=device, dtype=torch.float32)  # [R,2]
+    return roi_feat, roi_batch, roi_boxes
+
