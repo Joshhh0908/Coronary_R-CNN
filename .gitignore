@@ -1,1 +1,54 @@
-# or use the cat > .gitignore method again
+# ===== Python junk =====
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ===== Virtual envs / conda =====
+.venv/
+venv/
+env/
+ENV/
+conda-meta/
+
+# ===== Notebooks =====
+.ipynb_checkpoints/
+
+# ===== Editors / OS =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ===== Logs / runs =====
+logs/
+runs/
+wandb/
+tensorboard/
+*.log
+
+# ===== Outputs / results =====
+results/
+outputs/
+tmp/
+*.png
+*.jpg
+*.jpeg
+
+# ===== Model weights / checkpoints =====
+checkpoints/
+weights/
+*.pth
+*.pt
+*.ckpt
+*.onnx
+
+# ===== Data / medical images (usually huge + sensitive) =====
+data/
+*.mhd
+*.raw
+*.nii
+*.nii.gz
+*.dcm
+
+# =====  dataset CSVs (contain patient IDs + NAS paths) =====
+*_cpr_*_02mm.csv
