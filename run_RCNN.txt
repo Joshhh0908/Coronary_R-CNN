@@ -1,0 +1,19 @@
+conda create -n RCNN python=3.8 -y
+conda activate RCNN
+conda install pytorch==1.8.1 torchvision==0.9.1 torchaudio==0.8.1 cudatoolkit=11.1 -c pytorch-lts -c nvidia
+
+pip install opencv-python
+pip install pandas
+pip install matplotlib
+pip install scikit-image
+pip install pynrrd
+pip install sklearn
+pip install einops
+pip install pydicom
+pip install tqdm
+pip install xlrd==1.2.0
+pip install nibabel
+pip install openpyxl
+pip install SimpleITK==2.2.1
+pip install sci-kit learn
+pip install torchio
