@@ -59,15 +59,15 @@ test_loader = DataLoader(
 )
 
 
-ds = VesselWindowDataset(train_csv, window_len=480, train=False, do_augment=False)
-x, t = ds[0]  # x: [1,L,H,W]
-vol = x.squeeze(0).numpy()  # [L,H,W]
+# ds = VesselWindowDataset(train_csv, window_len=480, train=False, do_augment=False)
+# x, t = ds[0]  # x: [1,L,H,W]
+# vol = x.squeeze(0).numpy()  # [L,H,W]
 
-mid = vol.shape[0] // 2
-plt.imshow(vol[mid], cmap="gray")
-plt.title(f"{t['id']}  z0={int(t['z0'])}  boxes={t['boxes'].shape[0]}")
-plt.show()
+# mid = vol.shape[0] // 2
+# plt.imshow(vol[mid], cmap="gray")
+# plt.title(f"{t['id']}  z0={int(t['z0'])}  boxes={t['boxes'].shape[0]}")
+# plt.show()
 
-print("Boxes (start,end):", t["boxes"])
-print("Plaque:", t["plaque"])
-print("Stenosis:", t["stenosis"])
+# print("Boxes (start,end):", t["boxes"])
+# print("Plaque:", t["plaque"])
+# print("Stenosis:", t["stenosis"])

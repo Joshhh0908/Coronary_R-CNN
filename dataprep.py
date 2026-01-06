@@ -221,16 +221,14 @@ class VesselWindowDataset(Dataset):
             cpr = r[1]
             msk = r[2]
 
-            sten = literal_eval(r[3])  # list
-            plaq = literal_eval(r[4])  # list
+            plaq = literal_eval(r[3])  # list
+            sten = literal_eval(r[4])  # list
 
             ves = None
-            if isinstance(sten, (list, tuple)) and len(sten) > 1:
-                ves = sten[1]
-            elif isinstance(plaq, (list, tuple)) and len(plaq) > 1:
+            if isinstance(plaq, (list, tuple)) and len(plaq) > 1:
                 ves = plaq[1]
-            if ves is None:
-                ves = "ves"
+            elif isinstance(sten, (list, tuple)) and len(sten) > 1:
+                ves = sten[1]
 
             self.patient_id.append(pid)
             self.cpr_path.append(cpr)
@@ -303,7 +301,7 @@ class VesselWindowDataset(Dataset):
                 ps, pe, pla_val = best
                 s2 = min(s, ps)
                 e2 = max(e, pe)
-                lesions_full.append((s2, e2, int(pla_val), float(ste_val)))
+                lesions_full.append((s2, e2, int(pla_val), int(ste_val)))
 
         # choose/crop/pad window
         z0 = choose_window_start_focus_lesion(
@@ -326,14 +324,14 @@ class VesselWindowDataset(Dataset):
             pla, ste = valpair
             boxes.append([float(s_rel), float(e_rel)])
             plaque.append(int(pla))
-            stenosis.append(float(ste))
+            stenosis.append(int(ste))
 
         x = torch.from_numpy(window).float().unsqueeze(0)  # [1,L,H,W]
 
         target = {
             "boxes": torch.tensor(boxes, dtype=torch.float32),              # [N,2]
             "plaque": torch.tensor(plaque, dtype=torch.long),               # [N]
-            "stenosis": torch.tensor(stenosis, dtype=torch.float32),         # [N]
+            "stenosis": torch.tensor(stenosis, dtype=torch.long),         # [N]
             "z0": torch.tensor([z0], dtype=torch.long),
             "orig_len": torch.tensor([D], dtype=torch.long),
             "valid_len": torch.tensor([valid_len], dtype=torch.long),

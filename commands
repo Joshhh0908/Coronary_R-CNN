@@ -2,3 +2,6 @@ python rpn_recall_eval.py \
   --csv /home/joshua/Coronary_R-CNN/train_cpr_all26_allbranch_02mm.csv \
   --use_train_sampling \
   --max_batches 100
+
+
+python check_label_ranges.py --csv   train_cpr_all26_allbranch_02mm.csv   val_cpr_all26_allbranch_02mm.csv   test_cpr_all26_allbranch_02mm.csv

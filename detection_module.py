@@ -140,14 +140,22 @@ def decode_deltas_to_boxes(anchors, deltas, Lf: int):
     return torch.stack([start, end], dim=-1)  # [B,N,2]
 
 
-def interval_iou_1d(a, b):
+def interval_iou_1d(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
     a: [N,2], b: [M,2]
+    returns: [N,M]
     """
-    inter = (torch.min(a[:, None, 1], b[None, :, 1]) - torch.max(a[:, None, 0], b[None, :, 0])).clamp(min=0)
-    union = (torch.max(a[:, None, 1], b[None, :, 1]) - torch.min(a[:, None, 0], b[None, :, 0])).clamp(min=1e-6)
-    return inter / union
+    if a.numel() == 0 or b.numel() == 0:
+        return torch.zeros((a.shape[0], b.shape[0]), device=a.device)
 
+    inter = (torch.min(a[:, None, 1], b[None, :, 1]) -
+             torch.max(a[:, None, 0], b[None, :, 0])).clamp(min=0)
+
+    a_len = (a[:, 1] - a[:, 0]).clamp(min=0)[:, None]  # [N,1]
+    b_len = (b[:, 1] - b[:, 0]).clamp(min=0)[None, :]  # [1,M]
+
+    union = (a_len + b_len - inter).clamp(min=1e-6)
+    return inter / union
 
 def nms_1d(boxes, scores, iou_thresh=0.5, topk=200):
     """
@@ -215,39 +223,39 @@ class RPN1D(nn.Module):
     @torch.no_grad()
     def propose(self, obj_logits, deltas, anchors, Lf,
                 score_thresh=0.3, pre_nms_topk=600, post_nms_topk=100, iou_thresh=0.5):
-        """
-        Turn raw RPN outputs into proposal boxes (in feature coords).
-        Returns: list length B, each is [num_props, 2]
-        """
         B, N = obj_logits.shape
         scores = torch.sigmoid(obj_logits)  # [B,N]
         boxes = decode_deltas_to_boxes(anchors, deltas, Lf=Lf)  # [B,N,2]
 
         proposals = []
+        scores_out = []
         for b in range(B):
             s = scores[b]
             bxs = boxes[b]
 
-            # filter by score
             keep = torch.where(s >= score_thresh)[0]
+
+            # fallback: if nothing passes threshold, still take top-k so downstream has something
             if keep.numel() == 0:
-                proposals.append(torch.zeros((0, 2), device=obj_logits.device))
-                continue
+                k = min(pre_nms_topk, s.numel())
+                topk_idx = torch.topk(s, k).indices
+                keep = topk_idx
+
+
             s = s[keep]
             bxs = bxs[keep]
 
-            # topk before NMS
             if s.numel() > pre_nms_topk:
                 topk_idx = torch.topk(s, pre_nms_topk).indices
                 s = s[topk_idx]
                 bxs = bxs[topk_idx]
 
-            # NMS
             keep_nms = nms_1d(bxs, s, iou_thresh=iou_thresh, topk=post_nms_topk)
             proposals.append(bxs[keep_nms])
+            scores_out.append(s[keep_nms])
 
-        return proposals
-    
+        return proposals, scores_out
+        
 
 def encode_boxes_to_deltas(anchors, gt_boxes):
     """
@@ -480,3 +488,151 @@ def roi_pool_1d(
     roi_boxes = torch.tensor(roi_boxes, device=device, dtype=torch.float32)  # [R,2]
     return roi_feat, roi_batch, roi_boxes
 
+#################### ROI HEADS ##########################
+
+
+def iou_1d_matrix(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    # can just call interval_iou_1d for consistency
+    return interval_iou_1d(a, b)
+
+
+def sample_rois(labels: torch.Tensor, batch_size: int = 128, pos_fraction: float = 0.25) -> torch.Tensor:
+    """
+    labels: [P] with {1 pos, 0 neg, -1 ignore}
+    returns indices to keep
+    """
+    device = labels.device
+    pos = torch.where(labels == 1)[0]
+    neg = torch.where(labels == 0)[0]
+
+    num_pos = min(int(batch_size * pos_fraction), pos.numel())
+    num_neg = min(batch_size - num_pos, neg.numel())
+
+    keep = []
+    if num_pos > 0:
+        keep.append(pos[torch.randperm(pos.numel(), device=device)[:num_pos]])
+    if num_neg > 0:
+        keep.append(neg[torch.randperm(neg.numel(), device=device)[:num_neg]])
+    if len(keep) == 0:
+        return torch.empty((0,), dtype=torch.long, device=device)
+    return torch.cat(keep, dim=0)
+
+
+def assign_rois_to_gt(
+    proposals_slice: torch.Tensor,  # [P,2] slice coords
+    gt_boxes_slice: torch.Tensor,   # [G,2] slice coords
+    gt_plaque: torch.Tensor,        # [G] ints (0..3 in your setup)
+    gt_sten: torch.Tensor,          # [G] ints (0..5)
+    pos_iou_thresh: float = 0.5,
+    neg_iou_thresh: float = 0.1,
+):
+    """
+    Returns:
+      labels: [P] {1 pos, 0 neg, -1 ignore}
+      plaque_t: [P] int class target (0 background, else 1..3)
+      sten_t:   [P] int class target (0 background, else 1..5)
+      matched_gt: [P,2] best-matching GT box for each proposal (zeros if no GT)
+    """
+    device = proposals_slice.device
+    P = proposals_slice.shape[0]
+
+    labels = torch.full((P,), -1, dtype=torch.long, device=device)
+    plaque_t = torch.zeros((P,), dtype=torch.long, device=device)
+    sten_t = torch.zeros((P,), dtype=torch.long, device=device)
+    matched_gt = torch.zeros((P, 2), dtype=torch.float32, device=device)
+
+    if P == 0:
+        return labels, plaque_t, sten_t, matched_gt
+
+    # If no GT -> all negatives/background
+    if gt_boxes_slice.numel() == 0:
+        labels[:] = 0
+        return labels, plaque_t, sten_t, matched_gt
+
+    iou = iou_1d_matrix(proposals_slice, gt_boxes_slice)  # [P,G]
+    max_iou, argmax = iou.max(dim=1)  # best GT for each proposal
+    matched_gt = gt_boxes_slice[argmax].float()
+
+    # neg/pos
+    labels[max_iou < neg_iou_thresh] = 0
+    labels[max_iou >= pos_iou_thresh] = 1
+
+    # assign class targets for positives
+    pos_idx = torch.where(labels == 1)[0]
+    if pos_idx.numel() > 0:
+        m = argmax[pos_idx]
+        plaque_t[pos_idx] = gt_plaque[m].long()
+        sten_t[pos_idx] = gt_sten[m].long()
+
+    return labels, plaque_t, sten_t, matched_gt
+
+
+class RoIHeads(nn.Module):
+    """
+    Inputs:
+      roi_feat: [R, C=512, roi_len]
+
+    Outputs:
+      calc_logit:     [R]   (sigmoid -> P(calcified present))
+      noncalc_logit:  [R]   (sigmoid -> P(non-calcified present))
+      sten_logits:    [R, 6]  (softmax over 0..5; 0 can be background/normal)
+      roi_deltas:     [R, 2]  (t_c, t_w) refinement deltas for proposal boxes
+    """
+    def __init__(self, in_c=512, roi_len=16, num_stenosis_classes=5):
+        super().__init__()
+        self.roi_len = roi_len
+
+        self.fc = nn.Sequential(
+            nn.Linear(in_c, 256),
+            nn.ReLU(inplace=True),
+            nn.Linear(256, 256),
+            nn.ReLU(inplace=True),
+        )
+
+        self.calc_head = nn.Linear(256, 1)
+        self.noncalc_head = nn.Linear(256, 1)
+
+        # 5-way stenosis: internal labels 0..4 correspond to original grades 1..5
+        self.sten_head = nn.Linear(256, num_stenosis_classes)
+
+        self.roi_reg_head = nn.Linear(256, 2)
+
+    def forward(self, roi_feat):
+        x = roi_feat.mean(dim=-1)   # [R,C]
+        x = self.fc(x)              # [R,256]
+
+        calc_logit = self.calc_head(x).squeeze(-1)
+        noncalc_logit = self.noncalc_head(x).squeeze(-1)
+        sten_logits = self.sten_head(x)          # [R,5]
+        roi_deltas = self.roi_reg_head(x)        # [R,2]
+        return calc_logit, noncalc_logit, sten_logits, roi_deltas
+
+
+def decode_deltas_to_boxes_1d(boxes, deltas, clip_min=0.0, clip_max=None):
+    """
+    boxes:  [R,2]  (start,end) in slice coords (or feature coords — just be consistent)
+    deltas: [R,2]  (t_c, t_w)
+    returns refined_boxes: [R,2]
+    """
+    b0, b1 = boxes[:, 0], boxes[:, 1]
+    c = 0.5 * (b0 + b1)
+    w = (b1 - b0).clamp(min=1e-6)
+
+    t_c = deltas[:, 0]
+    t_w = deltas[:, 1]
+
+    c2 = c + t_c * w
+    w2 = w * torch.exp(t_w).clamp(max=50)
+
+    start = c2 - 0.5 * w2
+    end   = c2 + 0.5 * w2
+
+    if clip_max is not None:
+        start = start.clamp(min=clip_min, max=clip_max)
+        end   = end.clamp(min=clip_min, max=clip_max)
+    else:
+        start = start.clamp(min=clip_min)
+        end   = end.clamp(min=clip_min)
+
+    end = torch.max(end, start + 1e-3)
+    return torch.stack([start, end], dim=-1)
