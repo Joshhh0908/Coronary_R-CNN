@@ -47,7 +47,7 @@ def main():
 
         proposals_feat = rpn.propose(
             obj_logits, deltas, anchors, Lf=Lf,
-            score_thresh=0.3, pre_nms_topk=600, post_nms_topk=50, iou_thresh=0.5
+            score_thresh=0.1, pre_nms_topk=600, post_nms_topk=50, iou_thresh=0.5
         )
 
         roi_feat, roi_batch, roi_boxes_feat = roi_pool_1d(feat, proposals_feat, roi_len=roi_len, pool="max")

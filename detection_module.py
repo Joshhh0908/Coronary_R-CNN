@@ -222,7 +222,7 @@ class RPN1D(nn.Module):
 
     @torch.no_grad()
     def propose(self, obj_logits, deltas, anchors, Lf,
-                score_thresh=0.3, pre_nms_topk=600, post_nms_topk=100, iou_thresh=0.5):
+                score_thresh=0.1, pre_nms_topk=600, post_nms_topk=100, iou_thresh=0.5):
         B, N = obj_logits.shape
         scores = torch.sigmoid(obj_logits)  # [B,N]
         boxes = decode_deltas_to_boxes(anchors, deltas, Lf=Lf)  # [B,N,2]

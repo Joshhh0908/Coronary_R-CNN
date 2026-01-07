@@ -32,7 +32,7 @@ def eval_rpn_recall(
     loader: DataLoader,
     device: str,
     stride: float = 16.0,
-    score_thresh: float = 0.3,
+    score_thresh: float = 0.1,
     pre_nms_topk: int = 600,
     post_nms_topk: int = 100,
     nms_iou: float = 0.5,
