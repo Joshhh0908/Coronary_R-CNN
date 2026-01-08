@@ -1,7 +1,27 @@
-python rpn_recall_eval.py \
-  --csv /home/joshua/Coronary_R-CNN/train_cpr_all26_allbranch_02mm.csv \
-  --use_train_sampling \
-  --max_batches 100
+python make_CPR_datasets.py \
+  --train_csv /home/joshua/Coronary_R-CNN/train_cpr_all26_allbranch_02mm.csv \
+  --val_csv //home/joshua/Coronary_R-CNN/val_cpr_all26_allbranch_02mm.csv \
+  --test_csv /home/joshua/Coronary_R-CNN/test_cpr_all26_allbranch_02mm.csv \
+  --out_root /home/joshua/Coronary_R-CNN/data\
+  --window_len 768 \
+  --spacing_mm 0.2 \
+  --augment_train \
+  --rotate_train \
+  --K_train 4 \
+  --K_val 1 \
+  --K_test 1 \
+  --save_float16 \
+  --seed 0
+
+
+
+python FE_RPN.py \
+  --data /home/joshua/Coronary_R-CNN/data \
+  --out_root /home/joshua/Coronary_R-CNN/RPN_results \
+  --epochs 200 --bs 2 --lr 1e-4 --num_workers 2 \
+  --pos_iou_thresh 0.4 --neg_iou_thresh 0.1 \
+  --score_thresh 0.1 --pre_nms_topk 600 --post_nms_topk 100 --nms_iou 0.5 \
+  --anchor_lengths 1,2,3,5,7
 
 
 python check_label_ranges.py --csv   train_cpr_all26_allbranch_02mm.csv   val_cpr_all26_allbranch_02mm.csv   test_cpr_all26_allbranch_02mm.csv

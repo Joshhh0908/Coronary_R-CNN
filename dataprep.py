@@ -344,12 +344,3 @@ class VesselWindowDataset(Dataset):
 
         return x, target
 
-
-def collate_fn(batch):
-    """
-    xs:      [B, 1, L, H, W]
-    targets: list[dict] length B
-    """
-    xs, targets = zip(*batch)
-    xs = torch.stack(xs, dim=0)
-    return xs, list(targets)
