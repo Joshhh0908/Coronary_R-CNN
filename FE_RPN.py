@@ -53,6 +53,55 @@ def append_metrics_csv(csv_path: str, header: list, row: dict):
             w.writeheader()
         w.writerow(row)
 
+def debug_miss_stages(obj_logits_1, deltas_1, anchors, gt_feat, Lf,
+                      score_thresh, pre_nms_topk, post_nms_topk, nms_iou, stride):
+    # decode ALL boxes
+    scores_all = torch.sigmoid(obj_logits_1)              # [N]
+    boxes_all  = decode_deltas_to_boxes(anchors, deltas_1[None, ...], Lf=Lf)[0]  # [N,2]
+
+    # IoU of all decoded boxes vs GT (in feature coords)
+    iou_all = interval_iou_1d(boxes_all, gt_feat)         # [N,G]
+    best_all = iou_all.max(dim=0).values if gt_feat.numel() else torch.zeros((0,), device=boxes_all.device)
+    best_all_max = float(best_all.max().item()) if best_all.numel() else 0.0
+
+    # after score thresh
+    keep = torch.where(scores_all >= score_thresh)[0]
+    best_after_thresh_max = 0.0
+    if keep.numel():
+        iou_thr = interval_iou_1d(boxes_all[keep], gt_feat)
+        best_after_thresh_max = float(iou_thr.max(dim=0).values.max().item())
+
+    # after pre-topk on score
+    best_after_pre_max = 0.0
+    if keep.numel():
+        s = scores_all[keep]
+        b = boxes_all[keep]
+        if s.numel() > pre_nms_topk:
+            idx = torch.topk(s, pre_nms_topk).indices
+            s = s[idx]; b = b[idx]
+        iou_pre = interval_iou_1d(b, gt_feat)
+        best_after_pre_max = float(iou_pre.max(dim=0).values.max().item())
+
+        # after NMS + post topk
+        keep_nms = nms_1d(b, s, iou_thresh=nms_iou, topk=post_nms_topk)
+        if keep_nms.numel():
+            iou_nms = interval_iou_1d(b[keep_nms], gt_feat)
+            best_after_nms_max = float(iou_nms.max(dim=0).values.max().item())
+        else:
+            best_after_nms_max = 0.0
+    else:
+        best_after_nms_max = 0.0
+
+    return {
+        "best_all_max": best_all_max,
+        "best_after_thresh_max": best_after_thresh_max,
+        "best_after_pre_max": best_after_pre_max,
+        "best_after_nms_max": best_after_nms_max,
+        "num_keep_after_thresh": int(keep.numel()),
+        "max_score_all": float(scores_all.max().item()),
+        "mean_score_all": float(scores_all.mean().item()),
+    }
+
 
 @torch.no_grad()
 def evaluate_rpn(
@@ -66,7 +115,8 @@ def evaluate_rpn(
     nms_iou=0.5,
     topk_for_recall=50,
     use_pbar: bool = False,
-    pbar_desc: str = "Val"
+    pbar_desc: str = "Val",
+    max_batches=None
 ):
     fe.eval()
     rpn.eval()
@@ -121,6 +171,9 @@ def evaluate_rpn(
         loss_sum += float(loss.item())
         n_batches += 1
 
+        if max_batches is not None and n_batches >= max_batches:
+            break
+
         B, _, Lf = feat.shape
         proposals_feat, scores_list = rpn.propose(
             obj_logits, deltas, anchors, Lf=Lf,
@@ -143,7 +196,36 @@ def evaluate_rpn(
             gt = targets[b]["boxes"].to(device)  # [G,2] slice coords
             if gt.numel() == 0:
                 continue
+                # ---- DEBUG INSERT START ----
+            # convert GT to FEATURE coords for debugging
+            gt_feat = gt / float(stride)
 
+            dbg = debug_miss_stages(
+                obj_logits_1=obj_logits[b],    # [N]
+                deltas_1=deltas[b],            # [N,2]
+                anchors=anchors,               # [N,2]
+                gt_feat=gt_feat,               # [G,2]
+                Lf=Lf,
+                score_thresh=score_thresh,
+                pre_nms_topk=pre_nms_topk,
+                post_nms_topk=post_nms_topk,
+                nms_iou=nms_iou,
+                stride=stride,
+            )
+
+            # optional: only print when it becomes a miss at your recall threshold (e.g. 0.5)
+            # BUT print the stage-wise best so you know who killed it.
+            if dbg["best_after_nms_max"] < 0.5:
+                print(
+                    f"[MISS@0.5] step={step} b={b} "
+                    f"all={dbg['best_all_max']:.3f} "
+                    f"thr={dbg['best_after_thresh_max']:.3f} "
+                    f"pre={dbg['best_after_pre_max']:.3f} "
+                    f"nms={dbg['best_after_nms_max']:.3f} "
+                    f"keep={dbg['num_keep_after_thresh']} "
+                    f"maxS={dbg['max_score_all']:.3f} meanS={dbg['mean_score_all']:.3f}"
+                )
+            # ---- DEBUG INSERT END ----
             num_samples_with_gt += 1
             G = gt.shape[0]
             total_gt += G

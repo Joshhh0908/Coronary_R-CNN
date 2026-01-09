@@ -18,10 +18,23 @@ python make_CPR_datasets.py \
 python FE_RPN.py \
   --data /home/joshua/Coronary_R-CNN/data \
   --out_root /home/joshua/Coronary_R-CNN/RPN_results \
-  --epochs 200 --bs 2 --lr 1e-4 --num_workers 2 \
+  --epochs 10 --bs 4 --lr 1e-4 --num_workers 2 \
   --pos_iou_thresh 0.4 --neg_iou_thresh 0.1 \
-  --score_thresh 0.1 --pre_nms_topk 600 --post_nms_topk 100 --nms_iou 0.5 \
-  --anchor_lengths 1,2,3,5,7
+  --score_thresh 0.05 --pre_nms_topk 600 --post_nms_topk 100 --nms_iou 0.5 \
+  --anchor_lengths 1,2,3,4,5,7,9
+
+python test_rpn.py \
+  --data /home/joshua/Coronary_R-CNN/data \
+  --ckpt /home/joshua/Coronary_R-CNN/RPN_results/fe_rpn_20260108_175945/checkpoints/epoch_004.pt \
+  --out_dir /home/joshua/Coronary_R-CNN/RPN_val_epoch4_vis \
+  --device cuda \
+  --score_thresh 0.1 \
+  --pre_nms_topk 600 \
+  --post_nms_topk 100 \
+  --nms_iou 0.5 \
+  --miss_iou_thresh 0.5 \
+  --max_vis 200
+
 
 
 python check_label_ranges.py --csv   train_cpr_all26_allbranch_02mm.csv   val_cpr_all26_allbranch_02mm.csv   test_cpr_all26_allbranch_02mm.csv

@@ -44,9 +44,11 @@ class RPN1D(nn.Module):
 
         anchors = make_anchors_1d(Lf, self.anchor_lengths, device=feat.device)  # [N,2]
         return obj, reg, anchors
+    
+
     @torch.no_grad()
     def propose(self, obj_logits, deltas, anchors, Lf,
-                score_thresh=0.1, pre_nms_topk=600, post_nms_topk=100, iou_thresh=0.5):
+                score_thresh=0.1, pre_nms_topk=600, post_nms_topk=100, iou_thresh=0.5, allow_fallback=False):
         B, N = obj_logits.shape
         scores = torch.sigmoid(obj_logits)  # [B,N]
         boxes = decode_deltas_to_boxes(anchors, deltas, Lf=Lf)  # [B,N,2]
@@ -61,9 +63,12 @@ class RPN1D(nn.Module):
 
             # fallback: if nothing passes threshold, still take top-k so downstream has something
             if keep.numel() == 0:
+                if not allow_fallback:
+                    proposals.append(torch.empty((0,2), device=bxs.device))
+                    scores_out.append(torch.empty((0,), device=s.device))
+                    continue
                 k = min(pre_nms_topk, s.numel())
-                topk_idx = torch.topk(s, k).indices
-                keep = topk_idx
+                keep = torch.topk(s, k).indices
 
 
             s = s[keep]
@@ -103,34 +108,35 @@ def make_anchors_1d(Lf: int, anchor_lengths, device):
 
 
 def decode_deltas_to_boxes(anchors, deltas, Lf: int):
-    """
-    anchors: [N,2] (start,end) in feature coords
-    deltas:  [B,N,2] where (t_c, t_w)
-    returns: boxes [B,N,2] in feature coords, clipped to [0, Lf]
-    """
-    # anchor center/width
     a_start = anchors[:, 0]
     a_end   = anchors[:, 1]
     a_c = 0.5 * (a_start + a_end)
     a_w = (a_end - a_start).clamp(min=1e-6)
 
     t_c = deltas[..., 0]
-    t_w = deltas[..., 1]
+    t_w = deltas[..., 1].clamp(min=-10.0, max=10.0)
 
-    # decode (center + log-width)
     c = a_c[None, :] + t_c * a_w[None, :]
-    w = a_w[None, :] * torch.exp(t_w).clamp(max=50)  # avoid inf
+    w = a_w[None, :] * torch.exp(t_w)
 
     start = c - 0.5 * w
     end   = c + 0.5 * w
 
-    # clip
+    # scalar clamp to [0, Lf]
     start = start.clamp(min=0.0, max=float(Lf))
     end   = end.clamp(min=0.0, max=float(Lf))
 
-    # enforce start<end
-    end = torch.max(end, start + 1e-3)
-    return torch.stack([start, end], dim=-1)  # [B,N,2]
+    # enforce end >= start + eps (elementwise)
+    eps = 1e-3
+    end = torch.maximum(end, start + eps)
+
+    # (optional) if that pushed end above Lf, re-clamp and re-enforce
+    end = end.clamp(max=float(Lf))
+    start = torch.minimum(start, end - eps)
+    start = start.clamp(min=0.0)
+
+    return torch.stack([start, end], dim=-1)
+
 
 
 def interval_iou_1d(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -225,10 +231,12 @@ def assign_rpn_targets_1d(
     labels[max_iou >= pos_iou_thresh] = 1
 
     # Force each GT to have at least one positive anchor (best anchor per GT)
-    best_anchor_for_each_gt = iou.argmax(dim=0)  # [M]
-    labels[best_anchor_for_each_gt] = 1
-    matched_gt[best_anchor_for_each_gt] = gt_boxes
-
+    best_anchor = iou.argmax(dim=0)          # [M]
+    best_iou_per_gt = iou.max(dim=0).values  # [M]
+    good = best_iou_per_gt >= 0.05
+    best_anchor = best_anchor[good]
+    labels[best_anchor] = 1
+    matched_gt[best_anchor] = gt_boxes[good]
     return labels, matched_gt
 
 
@@ -284,6 +292,7 @@ def rpn_loss_1d(
     total_reg = torch.zeros((), device=device)
     total_pos = 0
     total_samp = 0
+    num_valid = 0
 
     for b in range(B):
         gt_boxes_slice = targets[b]["boxes"].to(device)  # [M,2] slice coords
@@ -299,6 +308,7 @@ def rpn_loss_1d(
         keep = sample_anchors(labels, batch_size=sample_size, pos_fraction=pos_fraction)
         if keep.numel() == 0:
             continue
+        num_valid += 1
 
         total_samp += keep.numel()
 
@@ -317,11 +327,11 @@ def rpn_loss_1d(
             total_reg += reg_l
 
     # average over batch items that contributed
-    denom = max(1, B)
-    total_obj = total_obj / denom
-    total_reg = total_reg / denom
-    loss = total_obj + reg_weight * total_reg
 
+    denom = max(1, num_valid)
+    total_obj /= denom
+    total_reg /= denom
+    loss = total_obj + reg_weight * total_reg
     stats = {
         "loss_total": float(loss.detach().cpu()),
         "loss_obj": float(total_obj.detach().cpu()),
