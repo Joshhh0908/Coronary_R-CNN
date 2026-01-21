@@ -1,0 +1,45 @@
+baseline:
+python eval_full.py \
+  --data /home/joshua/Coronary_R-CNN/data \
+  --ckpt /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/checkpoints/epoch_085.pt \
+  --out_dir /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/eval_baseline_epoch085 \
+  --split test --bs 4 --num_workers 2 \
+  --stenosis_classes 5 \
+  --anchor_lengths 1,2,3,4,5,7,9 \
+  --score_thresh 0.05 --pre_nms_topk 600 --post_nms_topk 100 --nms_iou 0.5 \
+  --roi_len 16 --match_iou 0.5
+
+
+Score thresh:
+python eval_full.py \
+  --data /home/joshua/Coronary_R-CNN/data \
+  --ckpt /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/checkpoints/epoch_085.pt \
+  --out_dir /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/eval_ablate_score_epoch085 \
+  --split test --bs 4 --num_workers 2 \
+  --stenosis_classes 5 \
+  --anchor_lengths 1,2,3,4,5,7,9 \
+  --score_thresh 0.0 --pre_nms_topk 600 --post_nms_topk 100 --nms_iou 0.5 \
+  --roi_len 16 --match_iou 0.5
+
+post_nms topk:
+python eval_full.py \
+  --data /home/joshua/Coronary_R-CNN/data \
+  --ckpt /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/checkpoints/epoch_085.pt \
+  --out_dir /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/eval_ablate_post_epoch085 \
+  --split test --bs 4 --num_workers 2 \
+  --stenosis_classes 5 \
+  --anchor_lengths 1,2,3,4,5,7,9 \
+  --score_thresh 0.05 --pre_nms_topk 600 --post_nms_topk 500 --nms_iou 0.5 \
+  --roi_len 16 --match_iou 0.5
+
+
+nms iou too aggresive:
+python eval_full.py \
+  --data /home/joshua/Coronary_R-CNN/data \
+  --ckpt /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/checkpoints/epoch_085.pt \
+  --out_dir /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/eval_ablate_nms_epoch085 \
+  --split test --bs 4 --num_workers 2 \
+  --stenosis_classes 5 \
+  --anchor_lengths 1,2,3,4,5,7,9 \
+  --score_thresh 0.05 --pre_nms_topk 600 --post_nms_topk 100 --nms_iou 0.7 \
+  --roi_len 16 --match_iou 0.5

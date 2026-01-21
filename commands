@@ -36,5 +36,79 @@ python test_rpn.py \
   --max_vis 200
 
 
+python FE_RPN_ROI.py \
+  --data /home/joshua/Coronary_R-CNN/data \
+  --out_root /home/joshua/Coronary_R-CNN/DET_results \
+  --epochs 150 --bs 4 --lr 1e-4 --num_workers 2 \
+  --pos_iou_thresh 0.4 --neg_iou_thresh 0.1 \
+  --score_thresh 0.05 --pre_nms_topk 600 --post_nms_topk 100 --nms_iou 0.5 \
+  --anchor_lengths 1,2,3,4,5,7,9 \
+  --stenosis_classes 5
+
+
+python FE_RPN_ROI.py \
+  --data /home/joshua/Coronary_R-CNN/data \
+  --out_root /home/joshua/Coronary_R-CNN/DET_results \
+  --epochs 150 --bs 4 --lr 1e-4 --num_workers 2 \
+  --pos_iou_thresh 0.5 --neg_iou_thresh 0.3 \
+  --score_thresh 0.05 --pre_nms_topk 600 --post_nms_topk 100 --nms_iou 0.5 \
+  --anchor_lengths 1,2,3,4,5,7,9,11,13,15 \
+  --stenosis_classes 5
+
+
+python eval_full.py \
+  --data /home/joshua/Coronary_R-CNN/data \
+  --ckpt_dir /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/checkpoints \
+  --out_csv /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/eval_metrics.csv \
+  --bs 4 --num_workers 2 \
+  --stenosis_classes 5 \
+  --anchor_lengths 1,2,3,4,5,7,9 \
+  --score_thresh 0.05 --pre_nms_topk 600 --post_nms_topk 100 --nms_iou 0.5 \
+  --topk_for_recall 50 \
+  --roi_len 16 \
+  --match_iou_for_head 0.5
+
+python eval_full.py \
+  --data /home/joshua/Coronary_R-CNN/data \
+  --ckpt_dir /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/checkpoints \
+  --out_csv /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/eval_metrics_diag.csv \
+  --bs 4 --num_workers 2 \
+  --stenosis_classes 5 \
+  --anchor_lengths 1,2,3,4,5,7,9 \
+  --score_thresh 0.0 --pre_nms_topk 2000 --post_nms_topk 500 --nms_iou 0.7 \
+  --topk_for_recall 300 \
+  --roi_len 16 \
+  --match_iou_for_head 0.5
+
+
+
+python test_epoch.py \
+  --data /home/joshua/Coronary_R-CNN/data \
+  --ckpt /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/checkpoints/epoch_085.pt \
+  --out_dir /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/test_full_epoch_085 \
+  --split test \
+  --bs 4 --num_workers 2 \
+  --stenosis_classes 5 \
+  --anchor_lengths 1,2,3,4,5,7,9 \
+  --score_thresh 0.05 --pre_nms_topk 600 --post_nms_topk 100 --nms_iou 0.5 \
+  --topk_for_recall 50 \
+  --roi_len 16 \
+  --match_iou_for_head 0.5 \
+  --max_viz 120
+
+
+
+python eval_full.py \
+   --data /home/joshua/Coronary_R-CNN/data \
+   --ckpt /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260114_183413/checkpoints/epoch_010.pt \
+   --split val \
+   --stenosis_classes 5 \
+   --score_thresh 0.0 \
+   --pre_nms_topk 6000 \
+   --post_nms_topk 2000 \
+   --anchor_lengths 1,2,3,4,5,7,9,11,13,15 \
+   --nms_iou 0.5 \
+   --match_iou 0.5
+
 
 python check_label_ranges.py --csv   train_cpr_all26_allbranch_02mm.csv   val_cpr_all26_allbranch_02mm.csv   test_cpr_all26_allbranch_02mm.csv

@@ -24,12 +24,18 @@ class CachedWindowDataset(Dataset):
         if x.dtype == torch.float16:
             x = x.float()  # FE expects float32
 
-        target = {
-            "boxes": d["boxes"].float(),
-            "plaque": d["plaque"].long(),
-            "stenosis": d["stenosis"].long(),
-        }
+        boxes = d["boxes"].float()
+        if boxes.numel() == 0:
+            boxes = boxes.reshape(0, 2)
 
+        plaque = d["plaque"].long()
+        sten = d["stenosis"].long()
+
+        # stenosis remap 
+        sten = torch.where(sten > 0, sten - 1, sten)   # 1..5 -> 0..4
+        sten = sten.clamp(0, 4)
+
+        target = {"boxes": boxes, "plaque": plaque, "stenosis": sten}
         # optional: keep meta around for debugging
         if "meta" in d:
             target.update(d["meta"])

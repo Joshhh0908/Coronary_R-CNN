@@ -52,3 +52,5 @@ data/
 
 # =====  dataset CSVs (contain patient IDs + NAS paths) =====
 *_cpr_*_02mm.csv
+
+*csv
