@@ -361,7 +361,17 @@ def rpn_loss_1d(
 
 
         # sample anchors for stable training
-        keep = sample_anchors(labels, batch_size=sample_size, pos_fraction=pos_fraction)
+        scores_b = torch.sigmoid(obj_logits[b].detach())
+        keep = sample_anchors_hard(labels, scores_b, batch_size=sample_size, pos_fraction=pos_fraction, hard_neg_frac=0.5)
+        if not hasattr(rpn_loss_1d, "_dbg"):
+            rpn_loss_1d._dbg = True
+            with torch.no_grad():
+                kpos = keep[labels[keep] == 1]
+                kneg = keep[labels[keep] == 0]
+                print("[sample] pos", int(kpos.numel()), "neg", int(kneg.numel()))
+                if kpos.numel(): print("[sample] pos score mean", float(scores_b[kpos].mean()))
+                if kneg.numel(): print("[sample] neg score mean", float(scores_b[kneg].mean()))
+
         if keep.numel() == 0:
             continue
         num_valid += 1
@@ -370,7 +380,7 @@ def rpn_loss_1d(
 
         # objectness targets
         obj_t = (labels[keep] == 1).float()  # [K]
-        obj_l = F.binary_cross_entropy_with_logits(obj_logits[b, keep], obj_t, reduction="mean")
+        obj_l = focal_bce_with_logits(obj_logits[b, keep], obj_t, alpha=0.25, gamma=2.0)
         total_obj += obj_l
 
         # regression only for positive anchors
@@ -396,3 +406,47 @@ def rpn_loss_1d(
         "sampled_anchors": int(total_samp),
     }
     return loss, stats
+
+def sample_anchors_hard(labels, scores, batch_size=256, pos_fraction=0.5, hard_neg_frac=0.5):
+    device = labels.device
+    pos_idx = torch.where(labels == 1)[0]
+    neg_idx = torch.where(labels == 0)[0]
+
+    num_pos = min(int(batch_size * pos_fraction), pos_idx.numel())
+    num_neg = min(batch_size - num_pos, neg_idx.numel())
+
+    # sample positives randomly (fine)
+    if num_pos > 0:
+        pos_keep = pos_idx[torch.randperm(pos_idx.numel(), device=device)[:num_pos]]
+    else:
+        pos_keep = torch.empty((0,), dtype=torch.long, device=device)
+
+    if num_neg > 0:
+        # hard negatives: pick top scores among negatives
+        neg_scores = scores[neg_idx]
+        k_hard = int(num_neg * hard_neg_frac)
+        k_hard = min(k_hard, neg_idx.numel())
+        hard_neg = neg_idx[torch.topk(neg_scores, k_hard).indices]
+
+        # if you want some random negatives too:
+        k_rand = num_neg - k_hard
+        if k_rand > 0:
+            rest = neg_idx[torch.randperm(neg_idx.numel(), device=device)[:k_rand]]
+            neg_keep = torch.cat([hard_neg, rest], dim=0)
+        else:
+            neg_keep = hard_neg
+    else:
+        neg_keep = torch.empty((0,), dtype=torch.long, device=device)
+
+    return torch.cat([pos_keep, neg_keep], dim=0)
+
+
+def focal_bce_with_logits(logits, targets, alpha=0.25, gamma=2.0):
+    p = torch.sigmoid(logits)
+    ce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    p_t = p * targets + (1 - p) * (1 - targets)
+    loss = ce * ((1 - p_t) ** gamma)
+    if alpha is not None:
+        alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
+        loss = alpha_t * loss
+    return loss.mean()
