@@ -21,6 +21,21 @@ from roi_pool import roi_pool_1d
 from heads import RoIHeads
 from cached_ds import CachedWindowDataset, collate_fn
 
+
+def nms_1d_eval(boxes: torch.Tensor, scores: torch.Tensor, iou_thresh=0.5):
+    if boxes.numel() == 0:
+        return torch.empty((0,), dtype=torch.long, device=boxes.device)
+    idx = scores.argsort(descending=True)
+    keep = []
+    while idx.numel() > 0:
+        i = idx[0]
+        keep.append(i)
+        if idx.numel() == 1:
+            break
+        ious = interval_iou_1d(boxes[i:i+1], boxes[idx[1:]]).squeeze(0)
+        idx = idx[1:][ious <= iou_thresh]
+    return torch.stack(keep, dim=0)
+
 def pct(x, ps=(0, 10, 50, 90, 95, 99, 100)):
     x = np.asarray(x, dtype=np.float32)
     if x.size == 0:
@@ -258,6 +273,17 @@ def main():
     ap.add_argument("--bs", type=int, default=4)
     ap.add_argument("--num_workers", type=int, default=2)
 
+    ap.add_argument("--plaque_score_thresh", type=float, default=0.3,
+                help="filter detections by plaque lesionness score")
+    ap.add_argument("--plaque_bit_thr", type=float, default=0.5,
+                    help="threshold for converting plaque bits to class")
+    ap.add_argument("--use_combined_score", action="store_true",
+                    help="if set, final_score = rpn_score * plaque_lesionness else plaque_lesionness only")
+    ap.add_argument("--final_nms", action="store_true",
+                    help="apply a final NMS after roi_refined")
+    ap.add_argument("--final_nms_iou", type=float, default=0.5)
+
+
     # Must match training
     ap.add_argument("--stenosis_classes", type=int, required=True)  # K=5
     ap.add_argument("--anchor_lengths", type=str, default="1,2,3,5,7")
@@ -355,7 +381,7 @@ def main():
             pre_nms_topk=args.pre_nms_topk,
             post_nms_topk=args.post_nms_topk,
             iou_thresh=args.nms_iou,
-            allow_fallback=True,
+            allow_fallback=False,
         )
 
         # -------------------------
@@ -451,6 +477,13 @@ def main():
         else:
             scores_cat = torch.empty((0,), device=device, dtype=torch.float32)
 
+        
+        # scores_cat should align 1-to-1 with roi_pool concatenation
+        if scores_cat.numel() != rois_cat.shape[0]:
+            raise RuntimeError(
+                f"scores_cat mismatch: scores_cat={scores_cat.numel()} vs rois_cat={rois_cat.shape[0]}"
+            )
+
         # If no proposals at all: everything is FN for non-empty GT; nothing to classify
         if pooled.numel() == 0:
             for b in range(B):
@@ -459,19 +492,28 @@ def main():
                 total_gt += M
                 if M > 0:
                     # all FN: GT -> BG
-                    gt_sten = (targets[b]["stenosis"].long() - 1).clamp(0, K - 1)  # 1..5 -> 0..4
+                    gt_sten = targets[b]["stenosis"].long().to(device).clamp(0, K - 1)
                     gt_plaq = targets[b]["plaque"].long().clamp(0, 3)              # 1..3
                     update_cm_with_bg(cm_sten, gt_sten.cpu().numpy(), np.zeros((0,), dtype=np.int64),
                                       torch.empty((0,), dtype=torch.long), torch.full((M,), -1, dtype=torch.long))
                     update_cm_with_bg(cm_plaq, gt_plaq.cpu().numpy(), np.zeros((0,), dtype=np.int64),
                                       torch.empty((0,), dtype=torch.long), torch.full((M,), -1, dtype=torch.long))
-            continue
+            continue 
 
         out = roi_heads(pooled, rois_cat, Lf=Lf)
+        
+        plq_probs = torch.sigmoid(out["plaque_logits"])  # [R,2]
+        p_calc = plq_probs[:, 0]
+        p_nonc = plq_probs[:, 1]
+
+        # probability of "any plaque" (better than max): 1 - P(none) = 1 - (1-pc)(1-pn)
+        p_lesion = 1.0 - (1.0 - p_calc) * (1.0 - p_nonc)  # [R]
+
+
 
         # Pred labels
         pred_sten = torch.argmax(out["stenosis_logits"], dim=1).long()  # [R] in 0..K-1
-        pred_plaq = plaque_logits_to_class(out["plaque_logits"]).long() # [R] in 0..3
+        pred_plaq = plaque_logits_to_class(out["plaque_logits"], thr=args.plaque_bit_thr).long()
 
         # Choose boxes to match: refined boxes (better final behavior)
         pred_boxes_feat = out["roi_refined"].float()      # [R,2] in feature coords
@@ -486,7 +528,7 @@ def main():
                 M = int(gt_boxes.shape[0])
                 total_gt += M
                 if M > 0:
-                    gt_sten = (targets[b]["stenosis"].long() - 1).clamp(0, K - 1)
+                    gt_sten = targets[b]["stenosis"].long().to(device).clamp(0, K - 1)
                     gt_plaq = targets[b]["plaque"].long().clamp(0, 3)
                     # all FN
                     pred2gt = torch.empty((0,), dtype=torch.long)
@@ -495,10 +537,32 @@ def main():
                     update_cm_with_bg(cm_plaq, gt_plaq.cpu().numpy(), np.zeros((0,), dtype=np.int64), pred2gt, gt2pred)
                 continue
 
-            pb = pred_boxes_s[ridx].clamp(0, float(D)).contiguous()
-            ps = scores_cat[ridx] if scores_cat.numel() == pred_boxes_s.shape[0] else torch.ones((ridx.numel(),), device=device)
-            y_sten = pred_sten[ridx]
-            y_plaq = pred_plaq[ridx]
+            pb_all = pred_boxes_s[ridx].clamp(0, float(D)).contiguous()
+            rpn_s  = scores_cat[ridx]
+            lesion_s = p_lesion[ridx]
+
+            # final score
+            if args.use_combined_score:
+                ps_all = rpn_s * lesion_s
+            else:
+                ps_all = lesion_s
+
+            # FILTER: drop background-ish RoIs
+            keep = torch.where(ps_all >= args.plaque_score_thresh)[0]
+
+            pb = pb_all[keep]
+            ps = ps_all[keep]
+            y_sten = pred_sten[ridx][keep]
+            y_plaq = pred_plaq[ridx][keep]
+
+            # optional: final NMS after refinement (recommended)
+            if args.final_nms and pb.numel() > 0:
+                keep_nms = nms_1d_eval(pb, ps, iou_thresh=args.final_nms_iou)
+                pb = pb[keep_nms]
+                ps = ps[keep_nms]
+                y_sten = y_sten[keep_nms]
+                y_plaq = y_plaq[keep_nms]
+
 
             gt_boxes = targets[b]["boxes"].float().to(device)  # slice coords already
             M = int(gt_boxes.shape[0])
@@ -506,7 +570,7 @@ def main():
 
             # Remap GT stenosis from 1..5 -> 0..4 (your dataset has 1..5 when non-empty)
             if M > 0:
-                gt_sten = (targets[b]["stenosis"].long().to(device) - 1).clamp(0, K - 1)
+                gt_sten = targets[b]["stenosis"].long().to(device).clamp(0, K - 1)
                 gt_plaq = targets[b]["plaque"].long().to(device).clamp(0, 3)
             else:
                 gt_sten = torch.empty((0,), dtype=torch.long, device=device)

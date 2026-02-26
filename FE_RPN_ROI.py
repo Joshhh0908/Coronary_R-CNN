@@ -126,12 +126,20 @@ def main():
     # stenosis classes
     ap.add_argument("--stenosis_classes", type=int, required=True,
                     help="number of stenosis classes (K). targets[b]['stenosis'] must be in [0..K-1].")
+    ap.add_argument(
+        "--stenosis_class_weights",
+        type=str,
+        default="",
+        help="Comma-separated weights for stenosis CE, length = stenosis_classes. Example: 1,1,3"
+    )
 
     # loss weights
     ap.add_argument("--w_rpn", type=float, default=1.0)
     ap.add_argument("--w_plaque", type=float, default=1.0)
     ap.add_argument("--w_stenosis", type=float, default=1.0)
     ap.add_argument("--w_roi_reg", type=float, default=1.0)
+    ap.add_argument("--plaque_on_pos_only", action="store_true",
+                    help="compute plaque loss only on positive RoIs (ignore background)")
 
     ap.add_argument("--run_name", type=str, default="")
     ap.add_argument("--no_pbar", action="store_true")
@@ -155,17 +163,19 @@ def main():
     print("Outputs:", out_dir)
     print("Anchor lengths:", anchor_lengths, "stride:", stride, "stenosis_classes:", args.stenosis_classes)
 
+    stenosis_ce_w = None
+    if args.stenosis_class_weights.strip():
+        w = [float(x) for x in args.stenosis_class_weights.split(",")]
+        if len(w) != args.stenosis_classes:
+            raise ValueError(f"--stenosis_class_weights must have length {args.stenosis_classes}, got {len(w)}")
+        stenosis_ce_w = torch.tensor(w, dtype=torch.float32, device=device)
+
+
     ds_train = CachedWindowDataset(args.data, "train")
-    ds_val = CachedWindowDataset(args.data, "val")
-    print(f"Train samples: {len(ds_train)} | Val samples: {len(ds_val)}")
+
 
     train_loader = DataLoader(
         ds_train, batch_size=args.bs, shuffle=True,
-        num_workers=args.num_workers, pin_memory=(device.type == "cuda"),
-        collate_fn=collate_fn
-    )
-    val_loader = DataLoader(
-        ds_val, batch_size=args.bs, shuffle=False,
         num_workers=args.num_workers, pin_memory=(device.type == "cuda"),
         collate_fn=collate_fn
     )
@@ -313,7 +323,10 @@ def main():
                             plaque_w=args.w_plaque,
                             stenosis_w=args.w_stenosis,
                             roi_reg_w=args.w_roi_reg,
+                            stenosis_class_weights=stenosis_ce_w,
+                            plaque_on_pos_only=args.plaque_on_pos_only,
                         )
+
 
                         loss = args.w_rpn * loss_rpn + loss_roi
 

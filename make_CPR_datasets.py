@@ -18,8 +18,16 @@ from dataprep import (
     crop_or_pad_window,
     remap_intervals_to_window,
     augment_cpr_volume,
-)
+    stenosis_to_2class,  
 
+)
+def file_exists_mhd(path: str) -> bool:
+    # For .mhd, the corresponding .raw/.zraw/etc is usually referenced inside the header.
+    # But first we at least check the header exists.
+    return isinstance(path, str) and os.path.isfile(path)
+
+def has_modplus_lesion(sten_intervals) -> bool:
+    return any(float(ste_val) > 2 for (_, _, ste_val) in sten_intervals)
 
 def set_seed(seed: int):
     random.seed(seed)
@@ -77,21 +85,35 @@ def cache_split(
     do_augment: bool,
     do_rotate: bool,
     K: int,
+    K_modplus: int,
     seed: int,
     save_float16: bool,
+    only_indices=None
 ):
     os.makedirs(out_dir, exist_ok=True)
     rows = load_rows(csv_path)
 
     print(f"\n[{split_name}] rows={len(rows)} out_dir={out_dir} K={K}")
     print(f"[{split_name}] train_like={train_like} do_augment={do_augment} do_rotate={do_rotate}")
+    only = set(only_indices) if only_indices is not None else None
 
     for idx, r in enumerate(rows):
+        if only is not None and idx not in only:
+            continue
         pid = r[0]
         cpr_path = r[1]
         mask_path = r[2]
         plaque_list = literal_eval(r[3])
         sten_list = literal_eval(r[4])
+
+        def fix_case_path(p: str) -> str:
+            if not isinstance(p, str):
+                return p
+            # change "/SI_case_46/" -> "/SI_Case_46/" (adjust pattern to your real folder name)
+            return p.replace("/SI_case_", "/SI_Case_")
+
+        cpr_path = fix_case_path(cpr_path)
+        mask_path = fix_case_path(mask_path)
 
         vessel = None
         if isinstance(plaque_list, (list, tuple)) and len(plaque_list) > 1:
@@ -100,32 +122,52 @@ def cache_split(
             vessel = sten_list[1]
         vessel = "UNK" if vessel is None else str(vessel)
 
+        # --- validate paths (skip bad rows instead of crashing) ---
+        if not file_exists_mhd(cpr_path):
+            print(f"[{split_name}] MISSING CPR: idx={idx} pid={pid} vessel={vessel} path={cpr_path}")
+            continue
+        if not file_exists_mhd(mask_path):
+            print(f"[{split_name}] MISSING MASK: idx={idx} pid={pid} vessel={vessel} path={mask_path}")
+            continue
+
         # Load volume once
-        itk = sitk.ReadImage(cpr_path)
-        vol = sitk.GetArrayFromImage(itk)  # [D,H,W]
+        try:
+            itk = sitk.ReadImage(cpr_path)
+            vol = sitk.GetArrayFromImage(itk)  # [D,H,W]
+        except Exception as e:
+            print(f"[{split_name}] READ FAIL CPR: idx={idx} pid={pid} vessel={vessel} path={cpr_path} err={e}")
+            continue
+
         vol = clip_hu(vol, hu_min, hu_max)
+
 
         D, H, W = vol.shape
 
-        # Parse intervals (full coords)
         sten_intervals = parse_triplet_intervals(sten_list, z_len=D, spacing_mm=spacing_mm)
         plaq_intervals = parse_triplet_intervals(plaque_list, z_len=D, spacing_mm=spacing_mm)
-        lesions_full = merge_sten_plaque(sten_intervals, plaq_intervals)  # (s,e,pla,ste)
+        lesions_full = merge_sten_plaque(sten_intervals, plaq_intervals)
 
+        is_modplus = has_modplus_lesion(sten_intervals)
+
+        # choose how many cached variants to create
+        if train_like:
+            K_eff = K_modplus if is_modplus else K
+        else:
+            K_eff = K
         # Normalize (do this before augmentation so aug sees normalized values, matching your dataset)
         if normalize == "zscore":
             vol = zscore_norm(vol)
 
-        for k in range(K):
+        for k in range(K_eff):
             # Make each cached variant reproducible if seed provided
             set_seed(seed + idx * 1000 + k)
 
             v = vol
 
-            if do_augment and train_like:
+            if do_augment and train_like and is_modplus:
                 v = augment_cpr_volume(v)
 
-            if do_rotate and train_like and random.random() < 0.3:
+            if do_rotate and train_like and is_modplus and random.random() < 0.3:
                 angle = random.randint(-45, 45)
                 v = ndimage.rotate(v, angle, axes=(1, 2), reshape=False, order=1, mode="nearest")
 
@@ -155,7 +197,7 @@ def cache_split(
                 pla, ste = valpair
                 boxes.append([float(s_rel), float(e_rel)])
                 plaque.append(int(pla))
-                stenosis.append(int(ste))
+                stenosis.append(stenosis_to_2class(ste))
 
             x = torch.from_numpy(window).unsqueeze(0).float()  # [1,L,H,W]
             if save_float16:
@@ -192,7 +234,6 @@ def cache_split(
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--train_csv", required=True)
-    ap.add_argument("--val_csv", required=True)
     ap.add_argument("--test_csv", required=True)
     ap.add_argument("--out_root", required=True)
 
@@ -202,26 +243,31 @@ def main():
     ap.add_argument("--hu_max", type=float, default=900)
     ap.add_argument("--normalize", type=str, default="zscore", choices=["zscore", "none"])
 
-    ap.add_argument("--K_train", type=int, default=4)
-    ap.add_argument("--K_val", type=int, default=1)
+    ap.add_argument("--K_train_base", type=int, default=2, help="K for normal + mild (1-2)")
+    ap.add_argument("--K_train_modplus", type=int, default=8, help="K for moderate+ (3-5)")
     ap.add_argument("--K_test", type=int, default=1)
 
     ap.add_argument("--augment_train", action="store_true")
     ap.add_argument("--rotate_train", action="store_true")
 
-    ap.add_argument("--augment_val", action="store_true")
-    ap.add_argument("--rotate_val", action="store_true")
+
     ap.add_argument("--augment_test", action="store_true")
     ap.add_argument("--rotate_test", action="store_true")
 
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save_float16", action="store_true")
+    ap.add_argument("--only_idx_file", type=str, default="")
 
     args = ap.parse_args()
 
     out_train = os.path.join(args.out_root, "train")
-    out_val = os.path.join(args.out_root, "val")
     out_test = os.path.join(args.out_root, "test")
+
+    only_idx = None
+    if args.only_idx_file:
+        with open(args.only_idx_file) as f:
+            only_idx = [int(x.strip()) for x in f if x.strip()]
+
 
     cache_split(
         "train", args.train_csv, out_train,
@@ -232,23 +278,11 @@ def main():
         train_like=True,
         do_augment=args.augment_train,
         do_rotate=args.rotate_train,
-        K=args.K_train,
+        K=args.K_train_base,
+        K_modplus=args.K_train_modplus,
         seed=args.seed,
         save_float16=args.save_float16,
-    )
-
-    cache_split(
-        "val", args.val_csv, out_val,
-        window_len=args.window_len,
-        spacing_mm=args.spacing_mm,
-        hu_min=args.hu_min, hu_max=args.hu_max,
-        normalize=args.normalize,
-        train_like=False,                 # deterministic z0=0 by default
-        do_augment=args.augment_val,
-        do_rotate=args.rotate_val,
-        K=args.K_val,
-        seed=args.seed + 12345,
-        save_float16=args.save_float16,
+        only_indices=only_idx
     )
 
     cache_split(
@@ -261,13 +295,13 @@ def main():
         do_augment=args.augment_test,
         do_rotate=args.rotate_test,
         K=args.K_test,
+        K_modplus=args.K_test,
         seed=args.seed + 54321,
         save_float16=args.save_float16,
     )
 
     print("\nAll caching complete.")
     print("Train:", out_train)
-    print("Val:  ", out_val)
     print("Test: ", out_test)
 
 

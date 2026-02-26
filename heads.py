@@ -112,19 +112,42 @@ class RoIHeads(nn.Module):
     @staticmethod
     def losses(
         out: dict,
-        rois: torch.Tensor,                  # [R,2] feature coords (pooled from)
-        matched_gt_rois: torch.Tensor,       # [R,2] feature coords
-        matched_plaque: torch.Tensor,        # [R] in {0,1,2,3}
-        matched_stenosis: torch.Tensor,      # [R] in {0..K-1} (valid for positives)
+        rois: torch.Tensor,
+        matched_gt_rois: torch.Tensor,
+        matched_plaque: torch.Tensor,
+        matched_stenosis: torch.Tensor,
         plaque_w: float = 1.0,
         stenosis_w: float = 1.0,
         roi_reg_w: float = 1.0,
+        stenosis_class_weights: torch.Tensor = None,
+        plaque_on_pos_only: bool = False,
     ):
         device = out["plaque_logits"].device
 
-        # Plaque (two-bit BCE) on ALL sampled rois (background => 00)
+        # Plaque (two-bit BCE).  By default we weight only positive
+        # examples and optionally limit the loss to positives as well.
+        #
+        # `pos_weights` is a tensor [2] giving the multiplier for the
+        # positive term of each bit; this is appropriate when the issue
+        # is missing true plaques rather than being flooded by negatives.
+        # If `plaque_on_pos_only` is True we further drop background
+        # ROIs from the plaque loss entirely.
+
         bits = plaque_label_to_bits(matched_plaque).to(device)  # [R,2]
-        loss_plaque = F.binary_cross_entropy_with_logits(out["plaque_logits"], bits)
+        pos_weights = torch.tensor([1.0, 3.0], device=device)  # boost non‑calc bit
+        is_pos = (matched_plaque.to(device).long() != 0)
+        if plaque_on_pos_only:
+            if is_pos.any():
+                loss_plaque = F.binary_cross_entropy_with_logits(
+                                out["plaque_logits"][is_pos],
+                                bits[is_pos],
+                                pos_weight=pos_weights)
+            else:
+                loss_plaque = torch.zeros((), device=device)
+        else:
+            loss_plaque = F.binary_cross_entropy_with_logits(
+                            out["plaque_logits"], bits,
+                            pos_weight=pos_weights)
 
         # positives = non-background
         is_pos = (matched_plaque.to(device).long() != 0)
@@ -132,10 +155,13 @@ class RoIHeads(nn.Module):
         # Stenosis classification only on positives
         if is_pos.any():
             y = matched_stenosis.to(device).long()
-            loss_stenosis = F.cross_entropy(out["stenosis_logits"][is_pos], y[is_pos])
+            w = None
+            if stenosis_class_weights is not None:
+                w = stenosis_class_weights.to(device).float()
+            loss_stenosis = F.cross_entropy(out["stenosis_logits"][is_pos], y[is_pos], weight=w)
         else:
             loss_stenosis = torch.zeros((), device=device)
-
+            
         # RoI regression only on positives
         if is_pos.any():
             tgt = encode_boxes_to_deltas(rois[is_pos], matched_gt_rois[is_pos])  # [P,2]

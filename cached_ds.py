@@ -30,10 +30,10 @@ class CachedWindowDataset(Dataset):
 
         plaque = d["plaque"].long()
         sten = d["stenosis"].long()
+        sten = d["stenosis"].long()
+        if sten.numel() > 0:
+            assert sten.min() >= 0 and sten.max() < 2
 
-        # stenosis remap 
-        sten = torch.where(sten > 0, sten - 1, sten)   # 1..5 -> 0..4
-        sten = sten.clamp(0, 4)
 
         target = {"boxes": boxes, "plaque": plaque, "stenosis": sten}
         # optional: keep meta around for debugging

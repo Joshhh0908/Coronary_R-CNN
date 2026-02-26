@@ -1,114 +1,91 @@
 python make_CPR_datasets.py \
-  --train_csv /home/joshua/Coronary_R-CNN/train_cpr_all26_allbranch_02mm.csv \
-  --val_csv //home/joshua/Coronary_R-CNN/val_cpr_all26_allbranch_02mm.csv \
-  --test_csv /home/joshua/Coronary_R-CNN/test_cpr_all26_allbranch_02mm.csv \
-  --out_root /home/joshua/Coronary_R-CNN/data\
+  --train_csv new_data/train_val_cpr_all26_allbranch_02to04mm_review4.csv \
+  --test_csv new_data/test_cpr_all26_allbranch_02to04mm_review4.csv \
+  --out_root new_data/cpr_cache_pt \
   --window_len 768 \
   --spacing_mm 0.2 \
+  --hu_min -300 \
+  --hu_max 900 \
+  --normalize zscore \
+  --K_train_base 2 \
+  --K_train_modplus 8 \
+  --K_test 1 \
   --augment_train \
   --rotate_train \
-  --K_train 4 \
-  --K_val 1 \
-  --K_test 1 \
-  --save_float16 \
   --seed 0
 
 
 
-python FE_RPN.py \
-  --data /home/joshua/Coronary_R-CNN/data \
-  --out_root /home/joshua/Coronary_R-CNN/RPN_results \
-  --epochs 10 --bs 4 --lr 1e-4 --num_workers 2 \
-  --pos_iou_thresh 0.4 --neg_iou_thresh 0.1 \
-  --score_thresh 0.05 --pre_nms_topk 600 --post_nms_topk 100 --nms_iou 0.5 \
-  --anchor_lengths 1,2,3,4,5,7,9
-
-python test_rpn.py \
-  --data /home/joshua/Coronary_R-CNN/data \
-  --ckpt /home/joshua/Coronary_R-CNN/RPN_results/fe_rpn_20260108_175945/checkpoints/epoch_004.pt \
-  --out_dir /home/joshua/Coronary_R-CNN/RPN_val_epoch4_vis \
-  --device cuda \
-  --score_thresh 0.1 \
-  --pre_nms_topk 600 \
-  --post_nms_topk 100 \
-  --nms_iou 0.5 \
-  --miss_iou_thresh 0.5 \
-  --max_vis 200
-
 
 python FE_RPN_ROI.py \
-  --data /home/joshua/Coronary_R-CNN/data \
-  --out_root /home/joshua/Coronary_R-CNN/DET_results \
-  --epochs 150 --bs 4 --lr 1e-4 --num_workers 2 \
-  --pos_iou_thresh 0.4 --neg_iou_thresh 0.1 \
-  --score_thresh 0.05 --pre_nms_topk 600 --post_nms_topk 100 --nms_iou 0.5 \
-  --anchor_lengths 1,2,3,4,5,7,9 \
-  --stenosis_classes 5
-
-
-python FE_RPN_ROI.py \
-  --data /home/joshua/Coronary_R-CNN/data \
-  --out_root /home/joshua/Coronary_R-CNN/DET_results \
+  --data /home/joshua/Coronary_R-CNN/new_data/cpr_cache_pt \
+  --out_root /home/joshua/Coronary_R-CNN/new_data_results \
   --epochs 150 --bs 4 --lr 1e-4 --num_workers 2 \
   --pos_iou_thresh 0.5 --neg_iou_thresh 0.3 \
   --score_thresh 0.05 --pre_nms_topk 600 --post_nms_topk 100 --nms_iou 0.5 \
   --anchor_lengths 1,2,3,4,5,7,9,11,13,15 \
-  --stenosis_classes 5
+  --roi_pos_iou 0.5 --roi_neg_iou 0.1 --roi_sample_size 128 --roi_pos_fraction 0.5 \
+  --stenosis_classes 2 \
+  --stenosis_class_weights 1,3 \
+  --plaque_on_pos_only \ 
+  --w_plaque 3.0 \
+  --seed 0
 
 
+
+RUN_DIR="/home/joshua/Coronary_R-CNN/new_data_results/fe_rpn_roi_20260211_160645"
+DATA="/home/joshua/Coronary_R-CNN/new_data/cpr_cache_pt"
+
+for e in $(seq -w 001 031); do
+  CKPT="${RUN_DIR}/checkpoints/epoch_${e}.pt"
+  OUT="${RUN_DIR}/test/epoch_${e}"
+
+  if [ -f "$CKPT" ]; then
+    echo "=== Evaluating epoch_${e} ==="
+    mkdir -p "$OUT"
+    python eval_full.py \
+      --data "$DATA" \
+      --ckpt "$CKPT" \
+      --out_dir "$OUT" \
+      --split test --bs 4 --num_workers 2 \
+      --stenosis_classes 2 \
+      --anchor_lengths 1,2,3,4,5,7,9,11,13,15 \
+      --roi_len 16 \
+      --score_thresh 0.05 --pre_nms_topk 600 --post_nms_topk 100 --nms_iou 0.5 \
+      --match_iou 0.5 \
+      --plaque_score_thresh 0.0 --plaque_bit_thr 0.5 \
+      --use_combined_score \
+      --final_nms --final_nms_iou 0.5
+  else
+    echo "Missing: $CKPT"
+  fi
+done
+
+python collect_epoch_summaries.py \
+  --run_dir /home/joshua/Coronary_R-CNN/new_data_results/fe_rpn_roi_20260211_160645
+
+
+
+python combine_evals.py \
+  --root /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260121_180323/eval_val \
+  --out  /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260121_180323/eval_val/aggregate_epochs.csv
+
+
+RUN_DIR="/home/joshua/Coronary_R-CNN/new_data_results/fe_rpn_roi_20260211_160645"
+DATA="/home/joshua/Coronary_R-CNN/new_data/cpr_cache_pt"
+CKPT="${RUN_DIR}/checkpoints/epoch_030.pt"
+OUT="${RUN_DIR}/test_0.1_plaqfilter/epoch_030"
+mkdir -p "$OUT"
 python eval_full.py \
-  --data /home/joshua/Coronary_R-CNN/data \
-  --ckpt_dir /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/checkpoints \
-  --out_csv /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/eval_metrics.csv \
-  --bs 4 --num_workers 2 \
-  --stenosis_classes 5 \
-  --anchor_lengths 1,2,3,4,5,7,9 \
-  --score_thresh 0.05 --pre_nms_topk 600 --post_nms_topk 100 --nms_iou 0.5 \
-  --topk_for_recall 50 \
-  --roi_len 16 \
-  --match_iou_for_head 0.5
-
-python eval_full.py \
-  --data /home/joshua/Coronary_R-CNN/data \
-  --ckpt_dir /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/checkpoints \
-  --out_csv /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/eval_metrics_diag.csv \
-  --bs 4 --num_workers 2 \
-  --stenosis_classes 5 \
-  --anchor_lengths 1,2,3,4,5,7,9 \
-  --score_thresh 0.0 --pre_nms_topk 2000 --post_nms_topk 500 --nms_iou 0.7 \
-  --topk_for_recall 300 \
-  --roi_len 16 \
-  --match_iou_for_head 0.5
-
-
-
-python test_epoch.py \
-  --data /home/joshua/Coronary_R-CNN/data \
-  --ckpt /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/checkpoints/epoch_085.pt \
-  --out_dir /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260109_191925/test_full_epoch_085 \
-  --split test \
-  --bs 4 --num_workers 2 \
-  --stenosis_classes 5 \
-  --anchor_lengths 1,2,3,4,5,7,9 \
-  --score_thresh 0.05 --pre_nms_topk 600 --post_nms_topk 100 --nms_iou 0.5 \
-  --topk_for_recall 50 \
-  --roi_len 16 \
-  --match_iou_for_head 0.5 \
-  --max_viz 120
-
-
-
-python eval_full.py \
-   --data /home/joshua/Coronary_R-CNN/data \
-   --ckpt /home/joshua/Coronary_R-CNN/DET_results/fe_rpn_roi_20260114_183413/checkpoints/epoch_010.pt \
-   --split val \
-   --stenosis_classes 5 \
-   --score_thresh 0.0 \
-   --pre_nms_topk 6000 \
-   --post_nms_topk 2000 \
-   --anchor_lengths 1,2,3,4,5,7,9,11,13,15 \
-   --nms_iou 0.5 \
-   --match_iou 0.5
-
-
-python check_label_ranges.py --csv   train_cpr_all26_allbranch_02mm.csv   val_cpr_all26_allbranch_02mm.csv   test_cpr_all26_allbranch_02mm.csv
+      --data "$DATA" \
+      --ckpt "$CKPT" \
+      --out_dir "$OUT" \
+      --split test --bs 4 --num_workers 2 \
+      --stenosis_classes 2 \
+      --anchor_lengths 1,2,3,4,5,7,9,11,13,15 \
+      --roi_len 16 \
+      --score_thresh 0.05 --pre_nms_topk 600 --post_nms_topk 100 --nms_iou 0.5 \
+      --match_iou 0.5 \
+      --plaque_score_thresh 0.1 --plaque_bit_thr 0.5 \
+      --use_combined_score \
+      --final_nms --final_nms_iou 0.5

@@ -9,6 +9,15 @@ from torch.utils.data import Dataset
 import torchio as tio
 from scipy import ndimage
 
+def stenosis_to_2class(val):
+    v = int(round(float(val))) if val is not None else 0
+    if v <= 0:
+        raise ValueError(f"Got non-lesion stenosis value inside lesion interval: {val}")
+    return 0 if v <= 2 else 1
+
+
+
+
 def choose_window_start_focus_lesion(
     z_len: int,
     window_len: int,
@@ -216,7 +225,6 @@ class VesselWindowDataset(Dataset):
 
         for r in rows:
             # r layout from your sample:
-            # r[0]=patient_id, r[1]=cpr, r[2]=mask, r[3]=stenosis_str, r[4]=plaque_str
             pid = r[0]
             cpr = r[1]
             msk = r[2]
@@ -257,15 +265,28 @@ class VesselWindowDataset(Dataset):
         itk = sitk.ReadImage(cpr_path)
         vol = sitk.GetArrayFromImage(itk)  # [D,H,W]
         vol = clip_hu(vol, self.hu_min, self.hu_max)
+        
+        D, H, W = vol.shape
 
-        if self.do_augment:
+        sten_list = self.stenosis_list[index]
+        plaq_list = self.plaque_list[index]
+
+        # parse full-vessel intervals first (need labels before deciding augmentation)
+        sten_intervals = parse_triplet_intervals(sten_list, z_len=D, spacing_mm=self.spacing_mm)
+        plaq_intervals = parse_triplet_intervals(plaq_list, z_len=D, spacing_mm=self.spacing_mm)
+
+        # Determine if this sample contains any MODERATE+ lesion (original 3/4/5 -> class 2)
+        has_modplus = any((float(ste_val) > 2) for (_, _, ste_val) in sten_intervals)
+
+        # Apply augmentation ONLY if has moderate+ lesions
+        if self.do_augment and has_modplus:
             vol = augment_cpr_volume(vol)
 
-        if self.do_random_rotate and random.random() < 0.3:
+        if self.do_random_rotate and has_modplus and random.random() < 0.3:
             angle = random.randint(-45, 45)
             vol = ndimage.rotate(vol, angle, axes=(1, 2), reshape=False, order=1, mode="nearest")
 
-        D, H, W = vol.shape
+
         if self.normalize == "zscore":
             vol = zscore_norm(vol)
 
@@ -283,7 +304,9 @@ class VesselWindowDataset(Dataset):
             for (s1, e1, ste_val), (s2, e2, pla_val) in zip(sten_intervals, plaq_intervals):
                 s = min(s1, s2)
                 e = max(e1, e2)
-                lesions_full.append((s, e, int(pla_val), float(ste_val)))
+                if float(ste_val) > 0:
+                    lesions_full.append((s, e, int(pla_val), float(ste_val)))
+
         else:
             # overlap-based merge (more robust)
             for (s, e, ste_val) in sten_intervals:
@@ -301,8 +324,8 @@ class VesselWindowDataset(Dataset):
                 ps, pe, pla_val = best
                 s2 = min(s, ps)
                 e2 = max(e, pe)
-                lesions_full.append((s2, e2, int(pla_val), int(ste_val)))
-
+                if float(ste_val) > 0:
+                    lesions_full.append((s2, e2, int(pla_val), float(ste_val)))
         # choose/crop/pad window
         z0 = choose_window_start_focus_lesion(
             z_len=D,
@@ -322,9 +345,10 @@ class VesselWindowDataset(Dataset):
         stenosis = []
         for (s_rel, e_rel, valpair) in lesions_win:
             pla, ste = valpair
+            lab = stenosis_to_2class(ste)
             boxes.append([float(s_rel), float(e_rel)])
             plaque.append(int(pla))
-            stenosis.append(int(ste))
+            stenosis.append(lab)
 
         x = torch.from_numpy(window).float().unsqueeze(0)  # [1,L,H,W]
 
@@ -341,6 +365,11 @@ class VesselWindowDataset(Dataset):
             "cpr_path": cpr_path,
             "mask_path": self.mask_path[index],
         }
+
+        assert len(boxes) == len(plaque) == len(stenosis)
+        if len(stenosis) > 0:
+            u = set(stenosis)
+            assert u.issubset({0,1}), u
 
         return x, target
 
