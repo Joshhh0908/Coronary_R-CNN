@@ -383,7 +383,8 @@ def main():
             iou_thresh=args.nms_iou,
             allow_fallback=False,
         )
-
+        print("num props after RPN:", [int(p.shape[0]) for p in proposals_feat])
+        print("score p50/p90:", [float(torch.quantile(s, torch.tensor(0.5, device=s.device))) if s.numel() else 0 for s in scores_list])
         # -------------------------
         # DEBUG: GT widths + anchor pos/neg + score stats
         # -------------------------
@@ -539,16 +540,20 @@ def main():
 
             pb_all = pred_boxes_s[ridx].clamp(0, float(D)).contiguous()
             rpn_s  = scores_cat[ridx]
-            lesion_s = p_lesion[ridx]
+            # lesion_s = p_lesion[ridx]
 
-            # final score
-            if args.use_combined_score:
-                ps_all = rpn_s * lesion_s
-            else:
-                ps_all = lesion_s
+            # # final score
+            # if args.use_combined_score:
+            #     ps_all = rpn_s * lesion_s
+            # else:
+            #     ps_all = lesion_s
 
-            # FILTER: drop background-ish RoIs
-            keep = torch.where(ps_all >= args.plaque_score_thresh)[0]
+            # # FILTER: drop background-ish RoIs
+            # keep = torch.where(ps_all >= args.plaque_score_thresh)[0]
+
+            # ---- NO REJECTION MODE: score by RPN only, keep everything that survived RPN propose() ----
+            ps_all = rpn_s  # keep RPN score only
+            keep = torch.arange(ps_all.numel(), device=device)  # keep all RoIs
 
             pb = pb_all[keep]
             ps = ps_all[keep]

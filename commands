@@ -20,15 +20,12 @@ python make_CPR_datasets.py \
 python FE_RPN_ROI.py \
   --data /home/joshua/Coronary_R-CNN/new_data/cpr_cache_pt \
   --out_root /home/joshua/Coronary_R-CNN/new_data_results \
-  --epochs 150 --bs 4 --lr 1e-4 --num_workers 2 \
-  --pos_iou_thresh 0.5 --neg_iou_thresh 0.3 \
-  --score_thresh 0.05 --pre_nms_topk 600 --post_nms_topk 100 --nms_iou 0.5 \
+  --epochs 150 --bs 4 --lr 1e-4 --num_workers 4 \
+  --pos_iou_thresh 0.5 --neg_iou_thresh 0.2 \
+  --score_thresh 0.05 --pre_nms_topk 800 --post_nms_topk 150 --nms_iou 0.5 \
   --anchor_lengths 1,2,3,4,5,7,9,11,13,15 \
   --roi_pos_iou 0.5 --roi_neg_iou 0.1 --roi_sample_size 128 --roi_pos_fraction 0.5 \
   --stenosis_classes 2 \
-  --stenosis_class_weights 1,3 \
-  --plaque_on_pos_only \
-  --w_plaque 3.0 \
   --seed 0
 
 
@@ -52,8 +49,6 @@ for e in $(seq -w 001 150); do
       --roi_len 16 \
       --score_thresh 0.05 --pre_nms_topk 600 --post_nms_topk 100 --nms_iou 0.5 \
       --match_iou 0.5 \
-      --plaque_score_thresh 0.0 --plaque_bit_thr 0.5 \
-      --use_combined_score \
       --final_nms --final_nms_iou 0.5
   else
     echo "Missing: $CKPT"

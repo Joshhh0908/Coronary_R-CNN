@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.ops import nms as tv_nms
 
 
 class RPN1D(nn.Module):
@@ -25,7 +26,7 @@ class RPN1D(nn.Module):
         # self.reg_head = nn.Conv1d(in_c, self.A * 2, kernel_size=1)    # (t_c,t_w) per anchor
         
         self.obj_head = nn.Linear(in_c, self.A)        # lesion vs bg logits 
-        self.reg_head = nn.Linear(in_c, self.A)        # lesion vs bg logits 
+        self.reg_head = nn.Linear(in_c, self.A*2)        # lesion vs bg logits 
 
     def forward(self, feat):
         """
@@ -34,70 +35,77 @@ class RPN1D(nn.Module):
         B, C, Lf = feat.shape
         h = F.relu(self.conv(feat), inplace=True)
 
-        x = h.permute(0,2,1)         # [B,L,C]
-
-        obj = self.obj_head(x)          # [B,A,Lf]
-        reg = self.reg_head(x)          # [B,2A,Lf]
-
-        # reshape to flatten anchors across all positions
-        obj = obj.permute(0, 2, 1).contiguous()               # [B,Lf,A]
-        reg = reg.permute(0, 2, 1).contiguous()               # [B,Lf,2A]
-        reg = reg.view(B, Lf, self.A, 2)                      # [B,Lf,A,2]
-
-        obj = obj.view(B, Lf * self.A)                        # [B,N]
-        reg = reg.view(B, Lf * self.A, 2)                     # [B,N,2]
-
+        x = h.permute(0, 2, 1).contiguous()
+        obj = self.obj_head(x)     # [B,Lf,A]
+        reg = self.reg_head(x)     # [B,Lf,2A]
+        reg = reg.view(B, Lf, self.A, 2)
+        obj = obj.reshape(B, Lf * self.A)
+        reg = reg.reshape(B, Lf * self.A, 2)
         anchors = make_anchors_1d(Lf, self.anchor_lengths, device=feat.device)  # [N,2]
         return obj, reg, anchors
-    
+        
 
     @torch.no_grad()
-    def propose(self, obj_logits, deltas, anchors, Lf,
-                score_thresh=0.1, pre_nms_topk=600, post_nms_topk=100, iou_thresh=0.5, allow_fallback=False):
+    def propose(
+        self, obj_logits, deltas, anchors, Lf,
+        score_thresh=0.1, pre_nms_topk=600, post_nms_topk=100, iou_thresh=0.5,
+        allow_fallback=False,
+        has_gt=None,
+        fallback_topk=100,
+    ):
         B, N = obj_logits.shape
-        scores = torch.sigmoid(obj_logits)  # [B,N]
+        scores = torch.sigmoid(obj_logits)                 # [B,N]
         boxes = decode_deltas_to_boxes(anchors, deltas, Lf=Lf)  # [B,N,2]
-
-        # if torch.rand(()) < 0.02:  # ~2% of calls
-        #     s_all = scores.detach().flatten()
-        #     qs = torch.quantile(s_all, torch.tensor([0.5, 0.9, 0.99], device=s_all.device))
-        #     print(
-        #         f"[RPN] scores: min={float(s_all.min()):.6f} "
-        #         f"p50={float(qs[0]):.6f} p90={float(qs[1]):.6f} p99={float(qs[2]):.6f} "
-        #         f"max={float(s_all.max()):.6f} "
-        #         f"frac<0.01={float((s_all<0.01).float().mean()):.4f} "
-        #         f"frac<0.05={float((s_all<0.05).float().mean()):.4f}"
-        #     )
-        #     l = obj_logits.detach().flatten()
-        #     print(f"[RPN] logits: min={float(l.min()):.3f} mean={float(l.mean()):.3f} max={float(l.max()):.3f}")
 
         proposals = []
         scores_out = []
+
         for b in range(B):
-            s = scores[b]
-            bxs = boxes[b]
+            s = scores[b]          # [N]
+            bxs = boxes[b]         # [N,2]
 
-            keep = torch.where(s >= score_thresh)[0]
+            # -------------------------
+            # (1) TOPK FIRST (caps work)
+            # -------------------------
+            k = min(int(pre_nms_topk), s.numel())
+            topk_idx = torch.topk(s, k).indices
+            s = s[topk_idx]
+            bxs = bxs[topk_idx]
 
-            # fallback: if nothing passes threshold, still take top-k so downstream has something
-            if keep.numel() == 0:
-                if not allow_fallback:
-                    proposals.append(torch.empty((0,2), device=bxs.device))
-                    scores_out.append(torch.empty((0,), device=s.device))
-                    continue
-                k = min(pre_nms_topk, s.numel())
-                keep = torch.topk(s, k).indices
-
-
+            # -------------------------
+            # (2) THEN threshold (cheap)
+            # -------------------------
+            keep = (s >= score_thresh)
             s = s[keep]
             bxs = bxs[keep]
 
-            if s.numel() > pre_nms_topk:
-                topk_idx = torch.topk(s, pre_nms_topk).indices
-                s = s[topk_idx]
-                bxs = bxs[topk_idx]
+            # -------------------------
+            # (3) Fallback logic (GT-only)
+            # -------------------------
+            if s.numel() == 0:
+                # Old behavior: allow_fallback means "always fallback"
+                # New recommended behavior: fallback only if this sample has GT
+                do_fb = False
+                if allow_fallback:
+                    do_fb = True
+                elif has_gt is not None and bool(has_gt[b]):
+                    do_fb = True
 
-            keep_nms = nms_1d(bxs, s, iou_thresh=iou_thresh, topk=post_nms_topk)
+                if not do_fb:
+                    proposals.append(torch.empty((0, 2), device=bxs.device))
+                    scores_out.append(torch.empty((0,), device=s.device))
+                    continue
+
+                # small fallback, not pre_nms_topk
+                kfb = min(int(fallback_topk), scores[b].numel())
+                fb_idx = torch.topk(scores[b], kfb).indices
+                s = scores[b][fb_idx]
+                bxs = boxes[b][fb_idx]
+
+            # -------------------------
+            # (4) NMS (fast version)
+            # -------------------------
+            keep_nms = nms_1d_torchvision(bxs, s, iou_thresh=iou_thresh, topk=post_nms_topk)
             proposals.append(bxs[keep_nms])
             scores_out.append(s[keep_nms])
 
@@ -174,26 +182,29 @@ def interval_iou_1d(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     union = (a_len + b_len - inter).clamp(min=1e-6)
     return inter / union
 
-def nms_1d(boxes, scores, iou_thresh=0.5, topk=200):
-    """
-    boxes:  [N,2]
-    scores: [N]
-    returns indices to keep
-    """
-    if boxes.numel() == 0:
-        return torch.empty((0,), dtype=torch.long, device=boxes.device)
 
-    idx = scores.argsort(descending=True)
-    keep = []
-    while idx.numel() > 0 and len(keep) < topk:
-        i = idx[0]
-        keep.append(i.item())
-        if idx.numel() == 1:
-            break
-        ious = interval_iou_1d(boxes[i:i+1], boxes[idx[1:]]).squeeze(0)
-        idx = idx[1:][ious <= iou_thresh]
-    return torch.tensor(keep, dtype=torch.long, device=boxes.device)
-    
+def nms_1d_torchvision(boxes_1d: torch.Tensor, scores: torch.Tensor, iou_thresh=0.5, topk=200):
+    """
+    boxes_1d: [N,2] (start,end)
+    scores:   [N]
+    returns: indices to keep
+    """
+    if boxes_1d.numel() == 0:
+        return torch.empty((0,), dtype=torch.long, device=boxes_1d.device)
+
+    x1 = boxes_1d[:, 0]
+    x2 = boxes_1d[:, 1]
+
+    # create fake 2D boxes: [x1, y1, x2, y2]
+    y1 = torch.zeros_like(x1)
+    y2 = torch.ones_like(x1)
+    boxes_2d = torch.stack([x1, y1, x2, y2], dim=1)
+
+    keep = tv_nms(boxes_2d, scores, iou_thresh)
+
+    if topk is not None and keep.numel() > topk:
+        keep = keep[:topk]
+    return keep
 
 def encode_boxes_to_deltas(anchors, gt_boxes):
     """
@@ -325,7 +336,7 @@ def rpn_loss_1d(
 
         # sample anchors for stable training
         scores_b = torch.sigmoid(obj_logits[b].detach())
-        keep = sample_anchors_hard(labels, scores_b, batch_size=sample_size, pos_fraction=pos_fraction, hard_neg_frac=0.5)
+        keep = sample_anchors(labels, batch_size=sample_size, pos_fraction=pos_fraction)
         if not hasattr(rpn_loss_1d, "_dbg"):
             rpn_loss_1d._dbg = True
             with torch.no_grad():
@@ -343,7 +354,8 @@ def rpn_loss_1d(
 
         # objectness targets
         obj_t = (labels[keep] == 1).float()  # [K]
-        obj_l = focal_bce_with_logits(obj_logits[b, keep], obj_t, alpha=0.25, gamma=2.0)
+        # obj_l = focal_bce_with_logits(obj_logits[b, keep], obj_t, alpha=0.25, gamma=2.0)
+        obj_l = F.binary_cross_entropy_with_logits(obj_logits[b, keep], obj_t)
         total_obj += obj_l
 
         # regression only for positive anchors
@@ -403,7 +415,7 @@ def sample_anchors_hard(labels, scores, batch_size=256, pos_fraction=0.5, hard_n
 
     return torch.cat([pos_keep, neg_keep], dim=0)
 
-
+#unused for now
 def focal_bce_with_logits(logits, targets, alpha=0.25, gamma=2.0):
     p = torch.sigmoid(logits)
     ce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
