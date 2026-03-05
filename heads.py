@@ -15,24 +15,25 @@ def decode_deltas_to_boxes_single(anchors_1d: torch.Tensor, deltas_1d: torch.Ten
     out = decode_deltas_to_boxes(anchors_1d, deltas_1d.unsqueeze(0), Lf=Lf)  # [1,N,2]
     return out.squeeze(0)
 
+#  Two-bit encoding (paper-style):
+# def plaque_label_to_bits(plaque_label: torch.Tensor) -> torch.Tensor:
+#     """
+#     Two-bit encoding (paper-style):
+#       bit0 = calcified present?
+#       bit1 = non-calcified present?
 
-def plaque_label_to_bits(plaque_label: torch.Tensor) -> torch.Tensor:
-    """
-    Two-bit encoding (paper-style):
-      bit0 = calcified present?
-      bit1 = non-calcified present?
+#     Labels:
+#       0 = background
+#       1 = non-calc
+#       2 = mixed
+#       3 = calcified
+#     """
+#     y = plaque_label.to(torch.long)
+#     bits = torch.zeros((y.numel(), 2), device=y.device, dtype=torch.float32)
+#     bits[:, 0] = ((y == 3) | (y == 2)).float()  # calc present
+#     bits[:, 1] = ((y == 1) | (y == 2)).float()  # non-calc present
+#     return bits
 
-    Labels:
-      0 = background
-      1 = non-calc
-      2 = mixed
-      3 = calcified
-    """
-    y = plaque_label.to(torch.long)
-    bits = torch.zeros((y.numel(), 2), device=y.device, dtype=torch.float32)
-    bits[:, 0] = ((y == 3) | (y == 2)).float()  # calc present
-    bits[:, 1] = ((y == 1) | (y == 2)).float()  # non-calc present
-    return bits
 
 
 class MLPHead(nn.Module):
@@ -52,16 +53,33 @@ class MLPHead(nn.Module):
         return h
 
 
-class PlaqueTwoBitHead(nn.Module):
+# class PlaqueTwoBitHead(nn.Module):
+#     def __init__(self, in_c: int = 512, hidden: int = 256, dropout: float = 0.1):
+#         super().__init__()
+#         self.backbone = MLPHead(in_c, hidden, dropout)
+#         self.out = nn.Linear(hidden, 4)  # logits for (calc_bit, noncalc_bit)
+
+#     def forward(self, pooled: torch.Tensor) -> torch.Tensor:
+#         return self.out(self.backbone(pooled))  # [N,2]
+
+class Plaque4ClassHead(nn.Module):
+    """
+    4-class plaque head.
+    Labels:
+      0 = background
+      1 = non-calc
+      2 = mixed
+      3 = calcified
+    Output: logits [N,4]
+    """
     def __init__(self, in_c: int = 512, hidden: int = 256, dropout: float = 0.1):
         super().__init__()
         self.backbone = MLPHead(in_c, hidden, dropout)
-        self.out = nn.Linear(hidden, 2)  # logits for (calc_bit, noncalc_bit)
+        self.out = nn.Linear(hidden, 4)
 
     def forward(self, pooled: torch.Tensor) -> torch.Tensor:
-        return self.out(self.backbone(pooled))  # [N,2]
-
-
+        return self.out(self.backbone(pooled))  # [N,4]
+    
 class StenosisClassHead(nn.Module):
     """
     Multi-class stenosis classification head.
@@ -93,12 +111,12 @@ class RoIRegressionHead(nn.Module):
 class RoIHeads(nn.Module):
     def __init__(self, stenosis_num_classes: int, in_c: int = 512, hidden: int = 256, dropout: float = 0.1):
         super().__init__()
-        self.plaque = PlaqueTwoBitHead(in_c, hidden, dropout)
+        self.plaque = Plaque4ClassHead(in_c, hidden, dropout)
         self.stenosis = StenosisClassHead(stenosis_num_classes, in_c, hidden, dropout)
         self.roi_reg = RoIRegressionHead(in_c, hidden, dropout)
 
     def forward(self, pooled: torch.Tensor, rois: torch.Tensor, Lf: int):
-        plaque_logits = self.plaque(pooled)             # [R,2]
+        plaque_logits = self.plaque(pooled)             # [R,4]
         stenosis_logits = self.stenosis(pooled)         # [R,K]
         roi_deltas = self.roi_reg(pooled)               # [R,2]
         roi_refined = decode_deltas_to_boxes_single(rois, roi_deltas, Lf=Lf)
@@ -133,25 +151,21 @@ class RoIHeads(nn.Module):
         # If `plaque_on_pos_only` is True we further drop background
         # ROIs from the plaque loss entirely.
 
-        bits = plaque_label_to_bits(matched_plaque).to(device)  # [R,2]
-        pos_weights = torch.tensor([1.0, 3.0], device=device)  # boost non‑calc bit
+        y_plaque = matched_plaque.to(device).long()  # [R]
+
         is_pos = (matched_plaque.to(device).long() != 0)
+
         if plaque_on_pos_only:
             if is_pos.any():
-                loss_plaque = F.binary_cross_entropy_with_logits(
+                loss_plaque = F.cross_entropy(
                                 out["plaque_logits"][is_pos],
-                                bits[is_pos],
-                                pos_weight=pos_weights)
+                                y_plaque[is_pos])
             else:
                 loss_plaque = torch.zeros((), device=device)
         else:
-            loss_plaque = F.binary_cross_entropy_with_logits(
-                            out["plaque_logits"], bits,
-                            pos_weight=pos_weights)
-
-        # positives = non-background
-        is_pos = (matched_plaque.to(device).long() != 0)
-
+            loss_plaque = F.cross_entropy(
+                            out["plaque_logits"], y_plaque)
+            
         # Stenosis classification only on positives
         if is_pos.any():
             y = matched_stenosis.to(device).long()

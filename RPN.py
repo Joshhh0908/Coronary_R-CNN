@@ -21,8 +21,11 @@ class RPN1D(nn.Module):
 
         # sibling heads (paper: 2 FC layers)
         # we implement as 1x1 convs (equivalent per position)
-        self.obj_head = nn.Conv1d(in_c, self.A, kernel_size=1)        # lesion vs bg logits
-        self.reg_head = nn.Conv1d(in_c, self.A * 2, kernel_size=1)    # (t_c,t_w) per anchor
+        # self.obj_head = nn.Conv1d(in_c, self.A, kernel_size=1)        # lesion vs bg logits
+        # self.reg_head = nn.Conv1d(in_c, self.A * 2, kernel_size=1)    # (t_c,t_w) per anchor
+        
+        self.obj_head = nn.Linear(in_c, self.A)        # lesion vs bg logits 
+        self.reg_head = nn.Linear(in_c, self.A)        # lesion vs bg logits 
 
     def forward(self, feat):
         """
@@ -31,8 +34,10 @@ class RPN1D(nn.Module):
         B, C, Lf = feat.shape
         h = F.relu(self.conv(feat), inplace=True)
 
-        obj = self.obj_head(h)          # [B,A,Lf]
-        reg = self.reg_head(h)          # [B,2A,Lf]
+        x = h.permute(0,2,1)         # [B,L,C]
+
+        obj = self.obj_head(x)          # [B,A,Lf]
+        reg = self.reg_head(x)          # [B,2A,Lf]
 
         # reshape to flatten anchors across all positions
         obj = obj.permute(0, 2, 1).contiguous()               # [B,Lf,A]
@@ -246,7 +251,7 @@ def assign_rpn_targets_1d(
     # Force each GT to have at least one positive anchor (best anchor per GT)
     best_anchor = iou.argmax(dim=0)          # [M]
     best_iou_per_gt = iou.max(dim=0).values  # [M]
-    good = best_iou_per_gt >= 0.3
+    good = best_iou_per_gt >= pos_iou_thresh
     best_anchor = best_anchor[good]
     labels[best_anchor] = 1
     matched_gt[best_anchor] = gt_boxes[good]
@@ -306,9 +311,6 @@ def rpn_loss_1d(
     total_pos = 0
     total_samp = 0
     num_valid = 0
-    
-    debug_max = 10
-    debug_count = 0
 
     for b in range(B):
         gt_boxes_slice = targets[b]["boxes"].to(device)  # [M,2] slice coords
@@ -319,45 +321,6 @@ def rpn_loss_1d(
             pos_iou_thresh=pos_iou_thresh,
             neg_iou_thresh=neg_iou_thresh,
         )
-
-        # # ---- DEBUG: GT coverage + scores ----
-        # if debug_count < debug_max:
-        #     with torch.no_grad():
-        #         # scores for all anchors in this window
-        #         s_all = torch.sigmoid(obj_logits[b])  # [N]
-
-        #         # IoU between every anchor and every GT: [N, M]
-        #         iou_am = interval_iou_1d(anchors, gt_boxes_feat)  # anchors vs GT
-
-        #         if gt_boxes_feat.numel() > 0:
-        #             # for each GT: best IoU any anchor achieves
-        #             best_iou_per_gt, best_anchor_idx = iou_am.max(dim=0)  # [M], [M]
-
-        #             # score of that best-IoU anchor
-        #             score_at_best_iou = s_all[best_anchor_idx]  # [M]
-
-        #             # also: best score among anchors that overlap the GT reasonably (IoU >= 0.3)
-        #             overlap = (iou_am >= 0.3)  # [N,M]
-        #             best_score_overlap = torch.zeros((iou_am.shape[1],), device=device)
-        #             for gi in range(iou_am.shape[1]):
-        #                 idx = torch.where(overlap[:, gi])[0]
-        #                 if idx.numel() == 0:
-        #                     best_score_overlap[gi] = -1.0  # means "no anchor overlaps at 0.3"
-        #                 else:
-        #                     best_score_overlap[gi] = s_all[idx].max()
-
-        #             def pct(x, p):
-        #                 return torch.quantile(x.float(), torch.tensor(p, device=x.device)).item()
-
-        #             print(
-        #                 f"[GT-COVERAGE] M={iou_am.shape[1]} "
-        #                 f"bestIoU p10={pct(best_iou_per_gt,0.10):.3f} p50={pct(best_iou_per_gt,0.50):.3f} p90={pct(best_iou_per_gt,0.90):.3f} "
-        #                 f"| score@bestIoU p10={pct(score_at_best_iou,0.10):.3g} p50={pct(score_at_best_iou,0.50):.3g} p90={pct(score_at_best_iou,0.90):.3g} "
-        #                 f"| bestScore(overlap>=0.3) p10={pct(best_score_overlap.clamp(min=0),0.10):.3g} p50={pct(best_score_overlap.clamp(min=0),0.50):.3g} p90={pct(best_score_overlap.clamp(min=0),0.90):.3g} "
-        #                 f"| frac(noOverlap0.3)={(best_score_overlap<0).float().mean().item():.3f}"
-        #             )
-        #         debug_count += 1
-        # # ---- END DEBUG ----
 
 
         # sample anchors for stable training

@@ -30,7 +30,6 @@ class CachedWindowDataset(Dataset):
 
         plaque = d["plaque"].long()
         sten = d["stenosis"].long()
-        sten = d["stenosis"].long()
         if sten.numel() > 0:
             assert sten.min() >= 0 and sten.max() < 2
 
